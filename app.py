@@ -22,4 +22,4 @@ with gr.Blocks(title="ClipIA") as demo:
     )
 
 demo.launch()
-      
+
