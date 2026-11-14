@@ -4,4 +4,4 @@ imageio-ffmpeg
 numpy
 opencv-python-headless
 faster-whisper
-av>=14.0.0
+av==18.1.0
