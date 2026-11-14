@@ -1,6 +1,4 @@
 
-
-        
 import os
 import cv2
 import subprocess
@@ -9,7 +7,7 @@ import gradio as gr
 import imageio_ffmpeg
 
 
-def analyser_video(video, nombre_clips):
+def analyser_video(video, nombre_clips, format_video):
     if video is None:
         raise gr.Error("Ajoute d'abord une vidéo.")
 
@@ -30,17 +28,11 @@ def analyser_video(video, nombre_clips):
 
     duree = total / fps
     nombre_clips = int(nombre_clips)
-
     longueur = min(30, duree)
 
-    if duree < longueur:
-        longueur = duree
-
     intervalles = []
-
     precedente = None
     scores = []
-
     compteur = 0
 
     while True:
@@ -100,26 +92,41 @@ def analyser_video(video, nombre_clips):
             dossier, f"clip_{i+1}.mp4"
         )
 
+        commande = [
+            ffmpeg, "-y",
+            "-ss", str(debut),
+            "-i", video,
+            "-t", str(longueur),
+            "-map", "0:v:0",
+            "-map", "0:a?",
+        ]
+
+        if format_video == "Vertical 9:16":
+            commande.extend([
+                "-vf",
+                "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280"
+            ])
+
+        commande.extend([
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            sortie
+        ])
+
         subprocess.run(
-            [
-                ffmpeg, "-y",
-                "-ss", str(debut),
-                "-i", video,
-                "-t", str(longueur),
-                "-map", "0:v:0",
-                "-map", "0:a?",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-movflags", "+faststart",
-                sortie
-            ],
+            commande,
             capture_output=True,
             text=True,
             timeout=180,
             check=True
         )
+
+        if not os.path.exists(sortie) or os.path.getsize(sortie) == 0:
+            raise gr.Error("Un clip n'a pas été créé.")
 
         clips.append(sortie)
 
@@ -130,13 +137,10 @@ with gr.Blocks(title="ClipIA") as demo:
 
     gr.Markdown("# 🎬 ClipIA")
     gr.Markdown(
-        "Détecte automatiquement les passages "
-        "dynamiques de tes vidéos."
+        "Détecte automatiquement les passages dynamiques de tes vidéos."
     )
 
-    video = gr.Video(
-        label="Choisis ta vidéo"
-    )
+    video = gr.Video(label="Choisis ta vidéo")
 
     nombre = gr.Slider(
         minimum=1,
@@ -146,25 +150,25 @@ with gr.Blocks(title="ClipIA") as demo:
         label="Nombre de clips"
     )
 
-    bouton = gr.Button(
-        "🚀 Créer mes clips"
+    format_video = gr.Radio(
+        choices=["Original", "Vertical 9:16"],
+        value="Original",
+        label="Format des clips"
     )
 
-    resultat = gr.Gallery(
-        label="Tes clips générés"
-    )
+    bouton = gr.Button("🚀 Créer mes clips")
+
+    resultat = gr.Gallery(label="Tes clips générés")
 
     bouton.click(
         analyser_video,
-        inputs=[video, nombre],
+        inputs=[video, nombre, format_video],
         outputs=resultat
     )
 
 
 demo.queue().launch(
     server_name="0.0.0.0",
-    server_port=int(
-        os.environ.get("PORT", 7860)
-    )
-    )
-    
+    server_port=int(os.environ.get("PORT", 7860))
+            )
+                
