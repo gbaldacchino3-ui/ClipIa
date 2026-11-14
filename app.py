@@ -1,4 +1,3 @@
-
 import os
 import cv2
 import subprocess
@@ -8,17 +7,17 @@ import imageio_ffmpeg
 from faster_whisper import WhisperModel
 
 # =====================================
-# CONFIGURATION CLIPIA
+# CONFIGURATION
 # =====================================
 
 modele_whisper = None
 
 DUREE_MAX_CLIP = 20
-PAS_ANALYSE = 2
+INTERVALLE_VISUEL = 4
 
 
 # =====================================
-# MODELE WHISPER
+# WHISPER
 # =====================================
 
 def obtenir_modele():
@@ -28,15 +27,13 @@ def obtenir_modele():
         modele_whisper = WhisperModel(
             "tiny",
             device="cpu",
-            compute_type="int8"
+            compute_type="int8",
+            cpu_threads=2,
+            num_workers=1
         )
 
     return modele_whisper
 
-
-# =====================================
-# ANALYSE DES PAROLES
-# =====================================
 
 def analyser_paroles(audio):
     modele = obtenir_modele()
@@ -44,7 +41,8 @@ def analyser_paroles(audio):
     segments, infos = modele.transcribe(
         audio,
         beam_size=1,
-        vad_filter=True
+        vad_filter=True,
+        condition_on_previous_text=False
     )
 
     resultat = []
@@ -63,7 +61,7 @@ def analyser_paroles(audio):
 
 
 # =====================================
-# ANALYSE VISUELLE
+# ANALYSE VISUELLE ALLEGEE
 # =====================================
 
 def analyser_visuellement(capture, fps, total):
@@ -71,7 +69,11 @@ def analyser_visuellement(capture, fps, total):
     scores = []
     precedente = None
 
-    intervalle = max(1, int(fps * PAS_ANALYSE))
+    intervalle = max(
+        1,
+        int(fps * INTERVALLE_VISUEL)
+    )
+
     compteur = 0
 
     while compteur < total:
@@ -88,7 +90,7 @@ def analyser_visuellement(capture, fps, total):
 
         petite = cv2.resize(
             frame,
-            (96, 54)
+            (64, 36)
         )
 
         gris = cv2.cvtColor(
@@ -116,7 +118,7 @@ def analyser_visuellement(capture, fps, total):
 
 
 # =====================================
-# DETECTION DES MOMENTS INTERESSANTS
+# SCORING DES PAROLES
 # =====================================
 
 def score_paroles(segments, debut, fin):
@@ -124,29 +126,13 @@ def score_paroles(segments, debut, fin):
     score = 0
 
     mots_reaction = [
-        "wow",
-        "haha",
-        "ahah",
-        "mdr",
-        "incroyable",
-        "attends",
-        "pourquoi",
-        "comment",
-        "jamais",
-        "vraiment",
-        "énorme",
-        "attention",
-        "regarde",
-        "sérieux",
-        "bravo",
-        "non",
-        "oh",
-        "quoi",
-        "impossible",
-        "mince",
-        "oups",
-        "surprise",
-        "excellent"
+        "wow", "haha", "ahah", "mdr",
+        "incroyable", "attends", "pourquoi",
+        "comment", "jamais", "vraiment",
+        "énorme", "attention", "regarde",
+        "sérieux", "bravo", "non", "oh",
+        "quoi", "impossible", "mince",
+        "oups", "surprise", "excellent"
     ]
 
     for segment in segments:
@@ -158,9 +144,7 @@ def score_paroles(segments, debut, fin):
 
             texte = segment["texte"].lower()
 
-            mots = texte.split()
-
-            score += len(mots)
+            score += len(texte.split())
 
             for mot in mots_reaction:
                 if mot in texte:
@@ -171,6 +155,10 @@ def score_paroles(segments, debut, fin):
 
     return score
 
+
+# =====================================
+# SCORING VISUEL
+# =====================================
 
 def score_visuel(scores_visuels, debut, fin):
 
@@ -183,14 +171,14 @@ def score_visuel(scores_visuels, debut, fin):
     if not valeurs:
         return 0
 
-    moyenne = sum(valeurs) / len(valeurs)
-    maximum = max(valeurs)
-
-    return moyenne + maximum * 0.5
+    return (
+        sum(valeurs) / len(valeurs)
+        + max(valeurs) * 0.5
+    )
 
 
 # =====================================
-# SELECTION DES CLIPS
+# CHOIX DES MEILLEURS PASSAGES
 # =====================================
 
 def choisir_passages(
@@ -206,23 +194,27 @@ def choisir_passages(
         duree - longueur
     )
 
-    pas = min(
-        PAS_ANALYSE,
-        max(0.5, dernier_debut / 10)
+    pas = 2
+
+    debuts = list(
+        range(
+            0,
+            int(dernier_debut) + 1,
+            pas
+        )
     )
 
-    debuts = []
-
-    temps = 0
-
-    while temps < dernier_debut:
-        debuts.append(temps)
-        temps += pas
-
-    debuts.append(dernier_debut)
+    if (
+        not debuts
+        or debuts[-1] < dernier_debut
+    ):
+        debuts.append(dernier_debut)
 
     maximum_visuel = max(
-        (score for temps, score in scores_visuels),
+        (
+            score
+            for temps, score in scores_visuels
+        ),
         default=0
     )
 
@@ -252,7 +244,6 @@ def choisir_passages(
                 visuel / maximum_visuel
             ) * 20
 
-        # Combinaison paroles et activité visuelle
         score = paroles + visuel
 
         candidats.append((
@@ -267,14 +258,13 @@ def choisir_passages(
 
     selection = []
 
-    # Priorité aux passages différents
+    # Sélection prioritaire des passages distincts
     for debut, score in candidats:
 
         if all(
             abs(debut - ancien) >= 1
             for ancien in selection
         ):
-
             selection.append(debut)
 
         if len(selection) >= nombre:
@@ -289,30 +279,11 @@ def choisir_passages(
         if debut not in selection:
             selection.append(debut)
 
-    # Si la vidéo ne permet pas assez de passages,
-    # utiliser des positions régulièrement espacées.
-    if len(selection) < nombre and dernier_debut > 0:
-
-        for i in range(nombre):
-
-            position = (
-                dernier_debut * i / max(1, nombre - 1)
-            )
-
-            if all(
-                abs(position - ancien) >= 0.5
-                for ancien in selection
-            ):
-                selection.append(position)
-
-            if len(selection) >= nombre:
-                break
-
     return sorted(selection[:nombre])
 
 
 # =====================================
-# CREATION DES CLIPS
+# CREATION RAPIDE DES CLIPS
 # =====================================
 
 def creer_clip(
@@ -324,7 +295,7 @@ def creer_clip(
     format_video
 ):
 
-    commande = [
+    base = [
         ffmpeg,
         "-y",
         "-ss",
@@ -335,55 +306,86 @@ def creer_clip(
         str(longueur)
     ]
 
-    if format_video == "Vertical 9:16":
+    # FORMAT ORIGINAL : COPIE SANS REENCODAGE
+    if format_video == "Original":
+
+        commande = base + [
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            sortie
+        ]
+
+        try:
+            subprocess.run(
+                commande,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=True
+            )
+
+            if (
+                os.path.exists(sortie)
+                and os.path.getsize(sortie) > 0
+            ):
+                return
+
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired
+        ):
+            pass
+
+        # Si la copie échoue, réencoder normalement
+        if os.path.exists(sortie):
+            os.remove(sortie)
+
+        commande = base + [
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-threads", "2",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "96k",
+            "-movflags", "+faststart",
+            sortie
+        ]
+
+    # FORMAT VERTICAL
+    else:
 
         filtre = (
             "[0:v]split=2[bg][fg];"
-            "[bg]scale=360:640:"
+            "[bg]scale=270:480:"
             "force_original_aspect_ratio=increase,"
-            "crop=360:640,boxblur=15:5[background];"
-            "[fg]scale=360:640:"
+            "crop=270:480,boxblur=8:2[background];"
+            "[fg]scale=270:480:"
             "force_original_aspect_ratio=decrease,"
             "setsar=1[foreground];"
             "[background][foreground]"
             "overlay=(W-w)/2:(H-h)/2[out]"
         )
 
-        commande.extend([
-            "-filter_complex",
-            filtre,
-            "-map",
-            "[out]"
-        ])
-
-    else:
-
-        commande.extend([
-            "-map",
-            "0:v:0"
-        ])
-
-    commande.extend([
-        "-map",
-        "0:a?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "28",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "96k",
-        "-threads",
-        "2",
-        "-movflags",
-        "+faststart",
-        sortie
-    ])
+        commande = base + [
+            "-filter_complex", filtre,
+            "-map", "[out]",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "30",
+            "-threads", "2",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "64k",
+            "-movflags", "+faststart",
+            sortie
+        ]
 
     subprocess.run(
         commande,
@@ -398,7 +400,7 @@ def creer_clip(
         or os.path.getsize(sortie) == 0
     ):
         raise gr.Error(
-            "Un clip n'a pas été créé correctement."
+            "Un clip n'a pas été créé."
         )
 
 
@@ -451,7 +453,7 @@ def analyser_video(
         duree
     )
 
-    # 1. Analyse visuelle
+    # ANALYSE VISUELLE
     try:
 
         scores_visuels = analyser_visuellement(
@@ -465,12 +467,12 @@ def analyser_video(
         capture.release()
 
         raise gr.Error(
-            "Erreur analyse visuelle : " + str(e)
+            "Erreur visuelle : " + str(e)
         )
 
     capture.release()
 
-    # 2. Extraction audio
+    # EXTRACTION AUDIO
     audio = os.path.join(
         dossier,
         "audio.wav"
@@ -479,15 +481,11 @@ def analyser_video(
     commande_audio = [
         ffmpeg,
         "-y",
-        "-i",
-        video,
+        "-i", video,
         "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-c:a",
-        "pcm_s16le",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
         audio
     ]
 
@@ -505,18 +503,11 @@ def analyser_video(
 
         segments = analyser_paroles(audio)
 
-    except subprocess.TimeoutExpired:
-
-        raise gr.Error(
-            "L'extraction audio prend trop de temps."
-        )
-
     except Exception:
-
         # Continuer avec l'analyse visuelle
         segments = []
 
-    # 3. Choix des meilleurs passages
+    # SELECTION DES PASSAGES
     intervalles = choisir_passages(
         segments,
         scores_visuels,
@@ -528,7 +519,7 @@ def analyser_video(
     if not intervalles:
         intervalles = [0]
 
-    # 4. Création des clips
+    # CREATION DES CLIPS
     clips = []
 
     for i, debut in enumerate(intervalles):
@@ -552,7 +543,7 @@ def analyser_video(
         except subprocess.TimeoutExpired:
 
             raise gr.Error(
-                "Le traitement est trop long. "
+                "Traitement trop long. "
                 "Essaie une vidéo plus courte."
             )
 
@@ -568,22 +559,22 @@ def analyser_video(
 
 
 # =====================================
-# INTERFACE CLIPIA
+# INTERFACE
 # =====================================
 
 with gr.Blocks(
-    title="ClipIA",
+    title="ClipIA V3",
     theme=gr.themes.Soft()
 ) as demo:
 
     gr.Markdown(
         """
-        # 🎬 ClipIA V2
+        # 🎬 ClipIA V3
 
-        ### Ton assistant intelligent de création de clips
+        ### Création intelligente de clips
 
         Analyse les paroles et les changements visuels
-        pour repérer des passages potentiellement intéressants.
+        pour trouver des passages intéressants.
         """
     )
 
@@ -631,7 +622,7 @@ with gr.Blocks(
     gr.Markdown(
         """
         ---
-        **ClipIA V2** · Analyse audio et visuelle
+        **ClipIA V3** · Performance optimisée
         """
     )
 
@@ -641,4 +632,5 @@ demo.queue().launch(
     server_port=int(
         os.environ.get("PORT", 7860)
     )
-)
+    )
+        
