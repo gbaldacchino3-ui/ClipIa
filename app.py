@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import gradio as gr
 import imageio_ffmpeg
+import json
 
 def analyser_video(video, nombre_clips):
     if video is None:
@@ -12,35 +13,41 @@ def analyser_video(video, nombre_clips):
     dossier = tempfile.mkdtemp()
 
     try:
-        probe = subprocess.run(
-            [ffmpeg, "-i", video, "-f", "null", "-"],
+        # Lecture rapide des informations vidéo
+        commande = [
+            ffmpeg, "-i", video,
+            "-f", "null", "-"
+        ]
+
+        resultat = subprocess.run(
+            commande,
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=30
         )
 
         import re
-        texte = probe.stderr
-
-        duree_match = re.search(
+        match = re.search(
             r"Duration: (\d+):(\d+):(\d+\.\d+)",
-            texte
+            resultat.stderr
         )
 
-        if not duree_match:
+        if not match:
             raise gr.Error("Impossible de lire la durée de la vidéo.")
 
-        h, m, s = duree_match.groups()
+        h, m, s = match.groups()
         duree = int(h) * 3600 + int(m) * 60 + float(s)
+
+        nombre_clips = int(nombre_clips)
+        longueur = min(30, duree / nombre_clips)
 
         clips = []
 
-        nombre_clips = min(int(nombre_clips), 5)
-        longueur = min(30, duree / nombre_clips)
-
         for i in range(nombre_clips):
-            debut = i * longueur
-            sortie = os.path.join(dossier, f"clip_{i+1}.mp4")
+            debut = i * duree / nombre_clips
+            sortie = os.path.join(
+                dossier, f"clip_{i+1}.mp4"
+            )
 
             subprocess.run(
                 [
@@ -49,18 +56,15 @@ def analyser_video(video, nombre_clips):
                     "-ss", str(debut),
                     "-i", video,
                     "-t", str(longueur),
-                    "-vf", "scale=-2:720",
-                    "-c:v", "libx264",
-                    "-preset", "ultrafast",
-                    "-crf", "28",
-                    "-c:a", "aac",
-                    "-b:a", "96k",
-                    "-movflags", "+faststart",
+                    "-map", "0:v:0",
+                    "-map", "0:a?",
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
                     sortie
                 ],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=90,
                 check=True
             )
 
@@ -69,15 +73,16 @@ def analyser_video(video, nombre_clips):
         return clips
 
     except subprocess.TimeoutExpired:
-        raise gr.Error("Le traitement prend trop de temps. Essaie une vidéo plus courte.")
+        raise gr.Error("Délai dépassé pendant le traitement.")
     except Exception as e:
         raise gr.Error(f"Erreur : {str(e)}")
 
 with gr.Blocks(title="ClipIA") as demo:
     gr.Markdown("# 🎬 ClipIA")
-    gr.Markdown("Transforme tes vidéos en clips automatiquement.")
+    gr.Markdown("Transforme tes vidéos en clips.")
 
     video = gr.Video(label="Choisis ta vidéo")
+
     nombre = gr.Slider(
         minimum=1,
         maximum=5,
@@ -87,13 +92,16 @@ with gr.Blocks(title="ClipIA") as demo:
     )
 
     bouton = gr.Button("🚀 Créer mes clips")
-    resultat = gr.Gallery(label="Tes clips générés")
+    resultat = gr.Gallery(label="Tes clips")
 
     bouton.click(
-        fn=analyser_video,
+        analyser_video,
         inputs=[video, nombre],
         outputs=resultat
     )
 
-demo.queue().launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
-                       
+demo.queue().launch(
+    server_name="0.0.0.0",
+    server_port=int(os.environ.get("PORT", 7860))
+        )
+            
