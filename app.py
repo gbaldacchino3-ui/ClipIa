@@ -7,7 +7,6 @@ import gradio as gr
 import imageio_ffmpeg
 from faster_whisper import WhisperModel
 
-# Le modèle est chargé une seule fois
 modele_whisper = None
 
 
@@ -48,7 +47,47 @@ def analyser_paroles(audio):
     return resultat
 
 
-def choisir_passages(segments, duree, longueur, nombre):
+def analyser_visuellement(capture, fps, total):
+    scores = []
+    precedente = None
+    intervalle = max(1, int(fps * 2))
+    compteur = 0
+
+    while compteur < total:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, compteur)
+        ok, frame = capture.read()
+
+        if not ok:
+            break
+
+        petite = cv2.resize(frame, (96, 54))
+        gris = cv2.cvtColor(
+            petite,
+            cv2.COLOR_BGR2GRAY
+        )
+
+        score = 0
+
+        if precedente is not None:
+            score = cv2.absdiff(
+                gris,
+                precedente
+            ).mean()
+
+        scores.append((compteur / fps, score))
+        precedente = gris
+        compteur += intervalle
+
+    return scores
+
+
+def choisir_passages(
+    segments,
+    scores_visuels,
+    duree,
+    longueur,
+    nombre
+):
     candidats = []
 
     pas = 5
@@ -63,13 +102,20 @@ def choisir_passages(segments, duree, longueur, nombre):
         "incroyable", "attends", "pourquoi",
         "comment", "jamais", "vraiment",
         "énorme", "attention", "regarde",
-        "sérieux", "wow", "haha"
+        "sérieux", "wow", "haha",
+        "bravo", "non", "oh"
     ]
+
+    maximum_visuel = max(
+        (score for temps, score in scores_visuels),
+        default=0
+    )
 
     for debut in debuts:
         fin = debut + longueur
         score = 0
 
+        # Analyse des paroles
         for segment in segments:
             chevauchement = (
                 segment["debut"] < fin
@@ -78,6 +124,7 @@ def choisir_passages(segments, duree, longueur, nombre):
 
             if chevauchement:
                 texte = segment["texte"].lower()
+
                 score += len(texte.split())
 
                 score += sum(
@@ -87,6 +134,17 @@ def choisir_passages(segments, duree, longueur, nombre):
 
                 score += texte.count("!") * 2
                 score += texte.count("?")
+
+        # Analyse des changements visuels
+        if maximum_visuel > 0:
+            activite = [
+                valeur
+                for temps, valeur in scores_visuels
+                if debut <= temps <= fin
+            ]
+
+            if activite:
+                score += (max(activite) / maximum_visuel) * 10
 
         if score > 0:
             candidats.append((debut, score))
@@ -131,7 +189,14 @@ def analyser_video(video, nombre_clips, format_video):
     nombre_clips = int(nombre_clips)
     longueur = min(20, duree)
 
-    # Extraction de l'audio
+    # Analyse visuelle de toute la vidéo
+    scores_visuels = analyser_visuellement(
+        capture,
+        fps,
+        total
+    )
+
+    # Extraction audio
     audio = os.path.join(dossier, "audio.wav")
 
     commande_audio = [
@@ -144,6 +209,8 @@ def analyser_video(video, nombre_clips, format_video):
         audio
     ]
 
+    segments = []
+
     try:
         subprocess.run(
             commande_audio,
@@ -155,72 +222,25 @@ def analyser_video(video, nombre_clips, format_video):
 
         segments = analyser_paroles(audio)
 
-        intervalles = choisir_passages(
-            segments,
-            duree,
-            longueur,
-            nombre_clips
-        )
-
-    except subprocess.CalledProcessError:
-        intervalles = []
-
     except subprocess.TimeoutExpired:
-        raise gr.Error("L'extraction audio prend trop de temps.")
-
-    except Exception as e:
+        capture.release()
         raise gr.Error(
-            "Erreur pendant l'analyse des paroles : " + str(e)
+            "L'extraction audio prend trop de temps."
         )
 
-    # Si aucune parole n'est détectée, analyse visuelle
-    if not intervalles:
-        precedente = None
-        scores = []
-        compteur = 0
-        intervalle = max(1, int(fps * 4))
+    except Exception:
+        # Si l'analyse audio échoue,
+        # on conserve l'analyse visuelle.
+        segments = []
 
-        while compteur < total:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, compteur)
-            ok, frame = capture.read()
-
-            if not ok:
-                break
-
-            petite = cv2.resize(frame, (96, 54))
-            gris = cv2.cvtColor(
-                petite,
-                cv2.COLOR_BGR2GRAY
-            )
-
-            score = 0
-
-            if precedente is not None:
-                score = cv2.absdiff(
-                    gris,
-                    precedente
-                ).mean()
-
-            scores.append((compteur / fps, score))
-            precedente = gris
-            compteur += intervalle
-
-        scores.sort(key=lambda x: x[1], reverse=True)
-
-        for temps, score in scores:
-            debut = max(
-                0,
-                min(temps - longueur / 2, duree - longueur)
-            )
-
-            if all(
-                abs(debut - ancien) >= longueur
-                for ancien in intervalles
-            ):
-                intervalles.append(debut)
-
-            if len(intervalles) >= nombre_clips:
-                break
+    # Combinaison des deux analyses
+    intervalles = choisir_passages(
+        segments,
+        scores_visuels,
+        duree,
+        longueur,
+        nombre_clips
+    )
 
     capture.release()
 
@@ -343,4 +363,6 @@ demo.queue().launch(
     server_name="0.0.0.0",
     server_port=int(os.environ.get("PORT", 7860))
     )
-    
+                
+            
+
