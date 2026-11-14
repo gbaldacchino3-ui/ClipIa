@@ -1,107 +1,60 @@
 import os
-import re
 import subprocess
 import tempfile
 import gradio as gr
 import imageio_ffmpeg
 
-from scenedetect import open_video, SceneManager
-from scenedetect.detectors import ContentDetector
-
-
-def analyser_video(video):
+def analyser_video(video, nombre_clips):
     if video is None:
         raise gr.Error("Ajoute d'abord une vidéo.")
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     dossier = tempfile.mkdtemp()
 
-    # Lire la durée
-    info = subprocess.run(
-        [ffmpeg, "-i", video, "-f", "null", "-"],
-        capture_output=True,
-        text=True,
-        timeout=120
-    )
-
-    match = re.search(
-        r"Duration: (\d+):(\d+):(\d+)",
-        info.stderr
-    )
-
-    if not match:
-        raise gr.Error("Impossible de lire la durée.")
-
-    h, m, s = map(int, match.groups())
-    duree = h * 3600 + m * 60 + s
-
-    if duree < 1:
-        raise gr.Error("La vidéo est trop courte.")
-
-    # Détection des changements de scène
-    candidats = [0.0]
-
     try:
-        source = open_video(video)
-        manager = SceneManager()
-        manager.add_detector(ContentDetector(threshold=27))
-        manager.detect_scenes(source)
-
-        scenes = manager.get_scene_list()
-
-        for debut_scene, fin_scene in scenes:
-            debut = debut_scene.get_seconds()
-
-            if 0 < debut < duree - 5:
-                candidats.append(debut)
-
-    except Exception:
-        pass
-
-    # Ajouter des points de départ réguliers
-    for debut in range(30, duree, 30):
-        candidats.append(float(debut))
-
-    candidats = sorted(set(candidats))
-
-    # Sélectionner les passages
-    selection = []
-
-    for debut in candidats:
-        longueur = min(30, duree - debut)
-
-        if longueur >= 5:
-            if all(abs(debut - ancien) >= 20 for ancien in selection):
-                selection.append(debut)
-
-    selection = selection[:10]
-
-    if not selection:
-        selection = [0.0]
-
-    # Créer les clips
-    clips = []
-
-    for index, debut in enumerate(selection):
-        sortie = os.path.join(
-            dossier,
-            f"clip_{index + 1}.mp4"
+        probe = subprocess.run(
+            [ffmpeg, "-i", video, "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=120
         )
 
-        longueur = min(30, duree - debut)
+        import re
+        texte = probe.stderr
 
-        try:
+        duree_match = re.search(
+            r"Duration: (\d+):(\d+):(\d+\.\d+)",
+            texte
+        )
+
+        if not duree_match:
+            raise gr.Error("Impossible de lire la durée de la vidéo.")
+
+        h, m, s = duree_match.groups()
+        duree = int(h) * 3600 + int(m) * 60 + float(s)
+
+        clips = []
+
+        nombre_clips = min(int(nombre_clips), 5)
+        longueur = min(30, duree / nombre_clips)
+
+        for i in range(nombre_clips):
+            debut = i * longueur
+            sortie = os.path.join(dossier, f"clip_{i+1}.mp4")
+
             subprocess.run(
                 [
-                    ffmpeg, "-y",
+                    ffmpeg,
+                    "-y",
                     "-ss", str(debut),
                     "-i", video,
                     "-t", str(longueur),
-                    "-map", "0:v:0",
-                    "-map", "0:a?",
+                    "-vf", "scale=-2:720",
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
+                    "-crf", "28",
                     "-c:a", "aac",
+                    "-b:a", "96k",
                     "-movflags", "+faststart",
                     sortie
                 ],
@@ -111,47 +64,36 @@ def analyser_video(video):
                 check=True
             )
 
-            if os.path.exists(sortie) and os.path.getsize(sortie) > 0:
-                clips.append((sortie, f"Clip {index + 1}"))
+            clips.append(sortie)
 
-        except subprocess.CalledProcessError as e:
-            raise gr.Error(
-                f"Erreur FFmpeg : {e.stderr[-1000:]}"
-            )
-        except subprocess.TimeoutExpired:
-            raise gr.Error("Le traitement a dépassé le délai autorisé.")
+        return clips
 
-    if not clips:
-        raise gr.Error("Aucun clip n'a pu être créé.")
-
-    return clips
-
+    except subprocess.TimeoutExpired:
+        raise gr.Error("Le traitement prend trop de temps. Essaie une vidéo plus courte.")
+    except Exception as e:
+        raise gr.Error(f"Erreur : {str(e)}")
 
 with gr.Blocks(title="ClipIA") as demo:
     gr.Markdown("# 🎬 ClipIA")
-    gr.Markdown(
-        "Détection automatique des changements de scène."
-    )
+    gr.Markdown("Transforme tes vidéos en clips automatiquement.")
 
     video = gr.Video(label="Choisis ta vidéo")
-
-    bouton = gr.Button("Trouver les meilleurs moments")
-
-    resultat = gr.Gallery(
-        label="🎬 Tes meilleurs clips",
-        columns=2,
-        allow_preview=True
+    nombre = gr.Slider(
+        minimum=1,
+        maximum=5,
+        value=3,
+        step=1,
+        label="Nombre de clips"
     )
+
+    bouton = gr.Button("🚀 Créer mes clips")
+    resultat = gr.Gallery(label="Tes clips générés")
 
     bouton.click(
         fn=analyser_video,
-        inputs=video,
+        inputs=[video, nombre],
         outputs=resultat
     )
 
-demo.queue()
-
-demo.launch(
-    server_name="0.0.0.0",
-    server_port=int(os.environ.get("PORT", 10000))
-)
+demo.queue().launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
+                       
