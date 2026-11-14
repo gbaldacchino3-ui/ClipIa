@@ -12,7 +12,7 @@ from faster_whisper import WhisperModel
 
 modele_whisper = None
 
-DUREE_MAX_CLIP = 20
+DUREE_MAX_CLIP = 45
 INTERVALLE_VISUEL = 4
 
 
