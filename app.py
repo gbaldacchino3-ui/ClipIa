@@ -1,4 +1,5 @@
 import os
+import os
 import re
 import subprocess
 import tempfile
@@ -11,7 +12,6 @@ def analyser_video(video):
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 
-    # Récupérer les informations de la vidéo
     info = subprocess.run(
         [ffmpeg, "-i", video, "-f", "null", "-"],
         capture_output=True,
@@ -52,13 +52,16 @@ def analyser_video(video):
             ], capture_output=True, timeout=120, check=True)
 
             if os.path.exists(sortie) and os.path.getsize(sortie) > 0:
-                clips.append(sortie)
+                clips.append((
+                    sortie,
+                    f"Clip {len(clips) + 1}"
+                ))
 
         except subprocess.TimeoutExpired:
-            raise gr.Error(f"Le clip {debut // 30 + 1} prend trop de temps.")
+            raise gr.Error("Le traitement prend trop de temps.")
 
         except subprocess.CalledProcessError:
-            raise gr.Error(f"Erreur pendant la création du clip {debut // 30 + 1}.")
+            raise gr.Error("Erreur pendant la création d'un clip.")
 
     if not clips:
         raise gr.Error("Aucun clip n'a pu être créé.")
@@ -68,11 +71,19 @@ def analyser_video(video):
 
 with gr.Blocks(title="ClipIA") as demo:
     gr.Markdown("# 🎬 ClipIA")
-    gr.Markdown("Découpe automatiquement tes vidéos en extraits de 30 secondes.")
+    gr.Markdown(
+        "Transforme tes vidéos en clips de 30 secondes."
+    )
 
     video = gr.Video(label="Choisis ta vidéo")
+
     bouton = gr.Button("Créer mes clips")
-    resultat = gr.File(label="Tes clips", file_count="multiple")
+
+    resultat = gr.Gallery(
+        label="🎬 Tes clips",
+        columns=2,
+        allow_preview=True
+    )
 
     bouton.click(
         fn=analyser_video,
@@ -86,4 +97,3 @@ demo.launch(
     server_name="0.0.0.0",
     server_port=int(os.environ.get("PORT", 10000))
     )
-                
