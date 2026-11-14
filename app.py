@@ -13,7 +13,6 @@ def analyser_video(video, nombre_clips, format_video):
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     dossier = tempfile.mkdtemp()
-
     capture = cv2.VideoCapture(video)
 
     if not capture.isOpened():
@@ -30,47 +29,39 @@ def analyser_video(video, nombre_clips, format_video):
     nombre_clips = int(nombre_clips)
     longueur = min(30, duree)
 
-    intervalles = []
     scores = []
+    intervalles = []
     precedente = None
+    compteur = 0
 
-    # Analyse rapide : une image toutes les 2 secondes
-    temps = 0
-
-    while temps < duree:
-        capture.set(cv2.CAP_PROP_POS_MSEC, temps * 1000)
+    while True:
         ok, frame = capture.read()
 
         if not ok:
-            temps += 2
-            continue
+            break
 
-        petite = cv2.resize(frame, (160, 90))
-        gris = cv2.cvtColor(
-            petite, cv2.COLOR_BGR2GRAY
-        )
+        if compteur % max(1, int(fps * 2)) == 0:
+            petite = cv2.resize(frame, (160, 90))
+            gris = cv2.cvtColor(petite, cv2.COLOR_BGR2GRAY)
 
-        score = 0
+            score = 0
+            if precedente is not None:
+                score = cv2.absdiff(gris, precedente).mean()
 
-        if precedente is not None:
-            score = cv2.absdiff(
-                gris, precedente
-            ).mean()
+            scores.append((compteur / fps, score))
+            precedente = gris
 
-        scores.append((temps, score))
-        precedente = gris
-
-        temps += 2
+        compteur += 1
 
     capture.release()
 
     scores.sort(key=lambda x: x[1], reverse=True)
 
     for temps, score in scores:
-        debut = max(
-            0,
-            min(temps - longueur / 2, duree - longueur)
-        )
+        debut = max(0, min(
+            temps - longueur / 2,
+            duree - longueur
+        ))
 
         if all(
             abs(debut - ancien) >= longueur
@@ -81,36 +72,22 @@ def analyser_video(video, nombre_clips, format_video):
         if len(intervalles) >= nombre_clips:
             break
 
-    # Compléter si nécessaire
-    for i in range(nombre_clips):
-        if len(intervalles) >= nombre_clips:
-            break
-
-        debut = i * max(0, duree - longueur) / max(
-            1, nombre_clips - 1
-        )
-
-        if all(
-            abs(debut - ancien) >= longueur
-            for ancien in intervalles
-        ):
-            intervalles.append(debut)
-
-    intervalles = sorted(intervalles[:nombre_clips])
+    if not intervalles:
+        intervalles = [
+            i * max(0, duree - longueur) / max(1, nombre_clips - 1)
+            for i in range(nombre_clips)
+        ]
 
     clips = []
 
     for i, debut in enumerate(intervalles):
-        sortie = os.path.join(
-            dossier, f"clip_{i+1}.mp4"
-        )
+        sortie = os.path.join(dossier, f"clip_{i+1}.mp4")
 
         commande = [
             ffmpeg, "-y",
             "-ss", str(debut),
             "-i", video,
             "-t", str(longueur),
-            "-map", "0:v:0",
             "-map", "0:a?",
         ]
 
@@ -129,9 +106,10 @@ def analyser_video(video, nombre_clips, format_video):
                 "-filter_complex", filtre,
                 "-map", "[out]"
             ])
-
-            # Retirer le mapping vidéo original
-            commande.remove("0:v:0")
+        else:
+            commande.extend([
+                "-map", "0:v:0"
+            ])
 
         commande.extend([
             "-c:v", "libx264",
@@ -154,9 +132,7 @@ def analyser_video(video, nombre_clips, format_video):
         except subprocess.TimeoutExpired:
             raise gr.Error("Le traitement est trop long.")
         except subprocess.CalledProcessError as e:
-            raise gr.Error(
-                f"Erreur FFmpeg : {e.stderr[-1000:]}"
-            )
+            raise gr.Error(f"Erreur FFmpeg : {e.stderr[-1000:]}")
 
         if not os.path.exists(sortie) or os.path.getsize(sortie) == 0:
             raise gr.Error("Un clip n'a pas été créé.")
@@ -167,11 +143,8 @@ def analyser_video(video, nombre_clips, format_video):
 
 
 with gr.Blocks(title="ClipIA") as demo:
-
     gr.Markdown("# 🎬 ClipIA")
-    gr.Markdown(
-        "Transforme automatiquement tes vidéos en clips."
-    )
+    gr.Markdown("Transforme automatiquement tes vidéos en clips.")
 
     video = gr.Video(label="Choisis ta vidéo")
 
@@ -190,10 +163,7 @@ with gr.Blocks(title="ClipIA") as demo:
     )
 
     bouton = gr.Button("🚀 Créer mes clips")
-
-    resultat = gr.Gallery(
-        label="Tes clips générés"
-    )
+    resultat = gr.Gallery(label="Tes clips générés")
 
     bouton.click(
         analyser_video,
@@ -205,5 +175,5 @@ with gr.Blocks(title="ClipIA") as demo:
 demo.queue().launch(
     server_name="0.0.0.0",
     server_port=int(os.environ.get("PORT", 7860))
-    )
-        
+            )
+            
