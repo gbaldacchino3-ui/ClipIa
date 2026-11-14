@@ -83,13 +83,15 @@ def analyser_video(video):
     # Sélectionner les passages de 30 secondes
     selection = []
 
+if duree <= 30:
+    selection.append(0.0)
+else:
     for debut in candidats:
         if debut + 30 <= duree:
             if all(abs(debut - ancien) >= 20 for ancien in selection):
                 selection.append(debut)
 
-    # Limiter le nombre de clips
-    selection = selection[:10]
+selection = selection[:10]
 
     clips = []
 
