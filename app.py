@@ -1,31 +1,9 @@
 import os
-import os
 import re
 import subprocess
 import tempfile
 import gradio as gr
 import imageio_ffmpeg
-
-def analyser_video(video):
-    if video is None:
-        raise gr.Error("Ajoute d'abord une vidéo.")
-
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-
-    info = subprocess.run(
-        [ffmpeg, "-i", video, "-f", "null", "-"],
-        capture_output=True,
-        text=True,
-        timeout=120
-    )
-
-    
-import os
-import subprocess
-import tempfile
-import gradio as gr
-import imageio_ffmpeg
-import numpy as np
 
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
@@ -33,31 +11,23 @@ from scenedetect.detectors import ContentDetector
 
 def analyser_video(video):
     if video is None:
-        raise gr.Error("Ajoute une vidéo.")
+        raise gr.Error("Ajoute d'abord une vidéo.")
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     dossier = tempfile.mkdtemp()
 
-    # Détection des changements de scène
-    scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector(threshold=27))
-
-    try:
-        source = open_video(video)
-        scene_manager.detect_scenes(source)
-        scenes = scene_manager.get_scene_list()
-    except Exception as e:
-        raise gr.Error(f"Erreur d'analyse vidéo : {e}")
-
-    # Récupérer la durée
+    # Lire la durée
     info = subprocess.run(
         [ffmpeg, "-i", video, "-f", "null", "-"],
         capture_output=True,
-        text=True
+        text=True,
+        timeout=120
     )
 
-    import re
-    match = re.search(r"Duration: (\d+):(\d+):(\d+)", info.stderr)
+    match = re.search(
+        r"Duration: (\d+):(\d+):(\d+)",
+        info.stderr
+    )
 
     if not match:
         raise gr.Error("Impossible de lire la durée.")
@@ -65,35 +35,52 @@ def analyser_video(video):
     h, m, s = map(int, match.groups())
     duree = h * 3600 + m * 60 + s
 
-    # Créer des passages candidats autour des changements de scène
-    candidats = []
+    if duree < 1:
+        raise gr.Error("La vidéo est trop courte.")
 
-    for debut_scene, fin_scene in scenes:
-        debut = debut_scene.get_seconds()
-        if debut < duree:
-            candidats.append(debut)
+    # Détection des changements de scène
+    candidats = [0.0]
 
-    # Ajouter des passages régulièrement espacés
-    for debut in range(0, duree, 30):
+    try:
+        source = open_video(video)
+        manager = SceneManager()
+        manager.add_detector(ContentDetector(threshold=27))
+        manager.detect_scenes(source)
+
+        scenes = manager.get_scene_list()
+
+        for debut_scene, fin_scene in scenes:
+            debut = debut_scene.get_seconds()
+
+            if 0 < debut < duree - 5:
+                candidats.append(debut)
+
+    except Exception:
+        pass
+
+    # Ajouter des points de départ réguliers
+    for debut in range(30, duree, 30):
         candidats.append(float(debut))
 
-    # Trier et supprimer les doublons proches
     candidats = sorted(set(candidats))
 
-    # Sélectionner les passages de 30 secondes
+    # Sélectionner les passages
     selection = []
 
-if duree <= 30:
-    selection.append(0.0)
-else:
     for debut in candidats:
-        if debut + 30 <= duree:
+        longueur = min(30, duree - debut)
+
+        if longueur >= 5:
             if all(abs(debut - ancien) >= 20 for ancien in selection):
                 selection.append(debut)
 
-selection = selection[:10]
+    selection = selection[:10]
 
-clips = []
+    if not selection:
+        selection = [0.0]
+
+    # Créer les clips
+    clips = []
 
     for index, debut in enumerate(selection):
         sortie = os.path.join(
@@ -101,20 +88,38 @@ clips = []
             f"clip_{index + 1}.mp4"
         )
 
-        subprocess.run([
-            ffmpeg, "-y",
-            "-ss", str(debut),
-            "-i", video,
-            "-t", "30",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-c:a", "aac",
-            "-movflags", "+faststart",
-            sortie
-        ], capture_output=True, timeout=120)
+        longueur = min(30, duree - debut)
 
-        if os.path.exists(sortie) and os.path.getsize(sortie) > 0:
-            clips.append((sortie, f"Clip {index + 1}"))
+        try:
+            subprocess.run(
+                [
+                    ffmpeg, "-y",
+                    "-ss", str(debut),
+                    "-i", video,
+                    "-t", str(longueur),
+                    "-map", "0:v:0",
+                    "-map", "0:a?",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-c:a", "aac",
+                    "-movflags", "+faststart",
+                    sortie
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=True
+            )
+
+            if os.path.exists(sortie) and os.path.getsize(sortie) > 0:
+                clips.append((sortie, f"Clip {index + 1}"))
+
+        except subprocess.CalledProcessError as e:
+            raise gr.Error(
+                f"Erreur FFmpeg : {e.stderr[-1000:]}"
+            )
+        except subprocess.TimeoutExpired:
+            raise gr.Error("Le traitement a dépassé le délai autorisé.")
 
     if not clips:
         raise gr.Error("Aucun clip n'a pu être créé.")
@@ -124,7 +129,9 @@ clips = []
 
 with gr.Blocks(title="ClipIA") as demo:
     gr.Markdown("# 🎬 ClipIA")
-    gr.Markdown("Détection automatique des scènes intéressantes.")
+    gr.Markdown(
+        "Détection automatique des changements de scène."
+    )
 
     video = gr.Video(label="Choisis ta vidéo")
 
