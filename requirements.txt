@@ -1,3 +1,5 @@
+
 gradio
 imageio-ffmpeg
-scenedetect[opencv]
+numpy
+
