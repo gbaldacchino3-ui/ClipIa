@@ -13,6 +13,7 @@ def analyser_video(video, nombre_clips, format_video):
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     dossier = tempfile.mkdtemp()
+
     capture = cv2.VideoCapture(video)
 
     if not capture.isOpened():
@@ -27,56 +28,49 @@ def analyser_video(video, nombre_clips, format_video):
 
     duree = total / fps
     nombre_clips = int(nombre_clips)
-    longueur = min(30, duree)
+    longueur = min(20, duree)
 
+    # Analyse rapide : une image toutes les 4 secondes
     scores = []
-    intervalles = []
     precedente = None
     compteur = 0
+    intervalle = max(1, int(fps * 4))
 
     while True:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, compteur)
         ok, frame = capture.read()
 
         if not ok:
             break
 
-        if compteur % max(1, int(fps * 2)) == 0:
-            petite = cv2.resize(frame, (160, 90))
-            gris = cv2.cvtColor(petite, cv2.COLOR_BGR2GRAY)
+        petite = cv2.resize(frame, (96, 54))
+        gris = cv2.cvtColor(petite, cv2.COLOR_BGR2GRAY)
 
-            score = 0
-            if precedente is not None:
-                score = cv2.absdiff(gris, precedente).mean()
+        score = 0
+        if precedente is not None:
+            score = cv2.absdiff(gris, precedente).mean()
 
-            scores.append((compteur / fps, score))
-            precedente = gris
-
-        compteur += 1
+        scores.append((compteur / fps, score))
+        precedente = gris
+        compteur += intervalle
 
     capture.release()
 
     scores.sort(key=lambda x: x[1], reverse=True)
 
-    for temps, score in scores:
-        debut = max(0, min(
-            temps - longueur / 2,
-            duree - longueur
-        ))
+    intervalles = []
 
-        if all(
-            abs(debut - ancien) >= longueur
-            for ancien in intervalles
-        ):
+    for temps, score in scores:
+        debut = max(0, min(temps - longueur / 2, duree - longueur))
+
+        if all(abs(debut - ancien) >= longueur for ancien in intervalles):
             intervalles.append(debut)
 
         if len(intervalles) >= nombre_clips:
             break
 
     if not intervalles:
-        intervalles = [
-            i * max(0, duree - longueur) / max(1, nombre_clips - 1)
-            for i in range(nombre_clips)
-        ]
+        intervalles = [0]
 
     clips = []
 
@@ -88,35 +82,33 @@ def analyser_video(video, nombre_clips, format_video):
             "-ss", str(debut),
             "-i", video,
             "-t", str(longueur),
-            "-map", "0:a?",
         ]
 
         if format_video == "Vertical 9:16":
             filtre = (
                 "[0:v]split=2[bg][fg];"
-                "[bg]scale=720:1280:force_original_aspect_ratio=increase,"
-                "crop=720:1280,boxblur=20:10[background];"
-                "[fg]scale=720:1280:force_original_aspect_ratio=decrease,"
+                "[bg]scale=360:640:force_original_aspect_ratio=increase,"
+                "crop=360:640,boxblur=15:5[background];"
+                "[fg]scale=360:640:force_original_aspect_ratio=decrease,"
                 "setsar=1[foreground];"
-                "[background][foreground]"
-                "overlay=(W-w)/2:(H-h)/2,format=yuv420p[out]"
+                "[background][foreground]overlay=(W-w)/2:(H-h)/2[out]"
             )
-
             commande.extend([
                 "-filter_complex", filtre,
                 "-map", "[out]"
             ])
         else:
-            commande.extend([
-                "-map", "0:v:0"
-            ])
+            commande.extend(["-map", "0:v:0"])
 
         commande.extend([
+            "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-crf", "23",
+            "-crf", "28",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
+            "-b:a", "96k",
+            "-threads", "2",
             "-movflags", "+faststart",
             sortie
         ])
@@ -126,13 +118,13 @@ def analyser_video(video, nombre_clips, format_video):
                 commande,
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=240,
                 check=True
             )
         except subprocess.TimeoutExpired:
-            raise gr.Error("Le traitement est trop long.")
+            raise gr.Error("Le traitement est trop long. Essaie une vidéo plus courte.")
         except subprocess.CalledProcessError as e:
-            raise gr.Error(f"Erreur FFmpeg : {e.stderr[-1000:]}")
+            raise gr.Error("Erreur FFmpeg : " + e.stderr[-1000:])
 
         if not os.path.exists(sortie) or os.path.getsize(sortie) == 0:
             raise gr.Error("Un clip n'a pas été créé.")
@@ -144,7 +136,7 @@ def analyser_video(video, nombre_clips, format_video):
 
 with gr.Blocks(title="ClipIA") as demo:
     gr.Markdown("# 🎬 ClipIA")
-    gr.Markdown("Transforme automatiquement tes vidéos en clips.")
+    gr.Markdown("Détecte automatiquement les passages dynamiques de tes vidéos.")
 
     video = gr.Video(label="Choisis ta vidéo")
 
@@ -163,6 +155,7 @@ with gr.Blocks(title="ClipIA") as demo:
     )
 
     bouton = gr.Button("🚀 Créer mes clips")
+
     resultat = gr.Gallery(label="Tes clips générés")
 
     bouton.click(
