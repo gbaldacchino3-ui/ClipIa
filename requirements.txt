@@ -3,5 +3,6 @@ gradio
 imageio-ffmpeg
 numpy
 opencv-python-headless
+faster-whisper
 
 
