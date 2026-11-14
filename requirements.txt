@@ -2,4 +2,6 @@
 gradio
 imageio-ffmpeg
 numpy
+opencv-python-headless
+
 
