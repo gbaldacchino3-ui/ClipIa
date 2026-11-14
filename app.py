@@ -1,10 +1,10 @@
- 
+
 import os
+import re
 import subprocess
 import tempfile
 import gradio as gr
 import imageio_ffmpeg
-import re
 
 def analyser_video(video, nombre_clips):
     if video is None:
@@ -14,12 +14,12 @@ def analyser_video(video, nombre_clips):
     dossier = tempfile.mkdtemp()
 
     try:
-        # Lire la durée sans décoder toute la vidéo
+        # Lire uniquement les métadonnées
         resultat = subprocess.run(
-            [ffmpeg, "-i", video, "-f", "null", "-"],
+            [ffmpeg, "-hide_banner", "-i", video],
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=15
         )
 
         match = re.search(
@@ -40,38 +40,38 @@ def analyser_video(video, nombre_clips):
 
         for i in range(nombre_clips):
             debut = i * duree / nombre_clips
-            sortie = os.path.join(dossier, f"clip_{i+1}.mp4")
-
-            commande = [
-                ffmpeg,
-                "-y",
-                "-ss", str(debut),
-                "-i", video,
-                "-t", str(longueur),
-                "-map", "0:v:0",
-                "-map", "0:a?",
-                "-c", "copy",
-                "-movflags", "+faststart",
-                sortie
-            ]
+            sortie = os.path.join(
+                dossier, f"clip_{i+1}.mp4"
+            )
 
             subprocess.run(
-                commande,
+                [
+                    ffmpeg, "-y",
+                    "-ss", str(debut),
+                    "-i", video,
+                    "-t", str(longueur),
+                    "-map", "0:v:0",
+                    "-map", "0:a?",
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    "-movflags", "+faststart",
+                    sortie
+                ],
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=120,
                 check=True
             )
 
             if not os.path.exists(sortie) or os.path.getsize(sortie) == 0:
-                raise gr.Error(f"Le clip {i+1} n'a pas été créé.")
+                raise gr.Error("Un clip n'a pas été créé.")
 
             clips.append(sortie)
 
         return clips
 
-    except subprocess.TimeoutExpired as e:
-        raise gr.Error(f"Étape trop longue : {e.cmd[0]}")
+    except subprocess.TimeoutExpired:
+        raise gr.Error("Le traitement dépasse le délai autorisé.")
     except subprocess.CalledProcessError as e:
         raise gr.Error(f"Erreur FFmpeg : {e.stderr[-1000:]}")
     except Exception as e:
@@ -103,5 +103,5 @@ with gr.Blocks(title="ClipIA") as demo:
 demo.queue().launch(
     server_name="0.0.0.0",
     server_port=int(os.environ.get("PORT", 7860))
-        )
-        
+                                                            )
+ 
