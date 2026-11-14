@@ -1,10 +1,7 @@
 import os
 import cv2
-import re
 import subprocess
 import tempfile
-import shutil
-import math
 import gradio as gr
 import imageio_ffmpeg
 
@@ -110,14 +107,21 @@ def extraire_audio(video, dossier):
         audio
     ]
 
-    resultat = subprocess.run(
-        commande,
-        capture_output=True,
-        text=True,
-        timeout=180
-    )
+    try:
+        resultat = subprocess.run(
+            commande,
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
 
-    if resultat.returncode != 0 or not os.path.isfile(audio):
+    except subprocess.TimeoutExpired:
+        return None
+
+    if resultat.returncode != 0:
+        return None
+
+    if not os.path.isfile(audio):
         return None
 
     if os.path.getsize(audio) == 0:
@@ -174,7 +178,10 @@ def analyser_audio(audio, duree):
             if texte.isupper() and len(texte) > 5:
                 score += 5
 
-            score += max(0, 10 - float(segment.no_speech_prob) * 10)
+            score += max(
+                0,
+                10 - float(segment.no_speech_prob) * 10
+            )
 
             passages.append({
                 "debut": debut,
@@ -219,7 +226,10 @@ def analyser_visuellement(video, fps, total_frames, duree):
             temps += INTERVALLE_ANALYSE
             continue
 
-        image = cv2.resize(image, (320, 180))
+        image = cv2.resize(
+            image,
+            (320, 180)
+        )
 
         gris = cv2.cvtColor(
             image,
@@ -267,18 +277,28 @@ def creer_candidats(duree, audio, visuel):
 
     candidats = []
 
-    duree_clip = min(30, DUREE_MAX_CLIP, duree)
+    duree_clip = min(
+        30,
+        DUREE_MAX_CLIP,
+        duree
+    )
 
     if duree_clip <= 0:
         return []
 
-    pas = max(2, duree_clip / 3)
+    pas = max(
+        2,
+        duree_clip / 3
+    )
 
     debut = 0
 
     while debut + duree_clip <= duree + 0.01:
 
-        fin = min(debut + duree_clip, duree)
+        fin = min(
+            debut + duree_clip,
+            duree
+        )
 
         score_audio = 0
         score_visuel = 0
@@ -383,15 +403,18 @@ def creer_clip(
 
         filtre = (
             "[0:v]split=2[arriere][avant];"
-            "[arriere]scale=480:854:force_original_aspect_ratio=increase,"
-            "crop=480:854,boxblur=20:10[fond];"
-            "[avant]scale=480:854:force_original_aspect_ratio=decrease"
-            "[image];"
-            "[fond][image]overlay=(W-w)/2:(H-h)/2"
+            "[arriere]scale=480:854:"
+            "force_original_aspect_ratio=increase,"
+            "crop=480:854,"
+            "boxblur=20:10[fond];"
+            "[avant]scale=480:854:"
+            "force_original_aspect_ratio=decrease[image];"
+            "[fond][image]overlay=(W-w)/2:(H-h)/2[sortie]"
         )
 
         commande += [
             "-filter_complex", filtre,
+            "-map", "[sortie]",
             "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "veryfast",
@@ -461,7 +484,10 @@ def analyser_video(
 
     try:
 
-        progress(0.05, desc="Lecture de la vidéo...")
+        progress(
+            0.05,
+            desc="Lecture de la vidéo..."
+        )
 
         fps, total_frames, duree = obtenir_infos_video(video)
 
@@ -475,21 +501,30 @@ def analyser_video(
             min(nombre_clips, NOMBRE_MAX_CLIPS)
         )
 
-        progress(0.12, desc="Extraction de l'audio...")
+        progress(
+            0.12,
+            desc="Extraction de l'audio..."
+        )
 
         audio_fichier = extraire_audio(
             video,
             dossier
         )
 
-        progress(0.20, desc="Analyse de la voix avec Whisper...")
+        progress(
+            0.20,
+            desc="Analyse de la voix avec Whisper..."
+        )
 
         audio = analyser_audio(
             audio_fichier,
             duree
         )
 
-        progress(0.45, desc="Analyse des images...")
+        progress(
+            0.45,
+            desc="Analyse des images..."
+        )
 
         visuel = analyser_visuellement(
             video,
@@ -498,7 +533,10 @@ def analyser_video(
             duree
         )
 
-        progress(0.60, desc="Recherche des meilleurs passages...")
+        progress(
+            0.60,
+            desc="Recherche des meilleurs passages..."
+        )
 
         candidats = creer_candidats(
             duree,
@@ -507,7 +545,9 @@ def analyser_video(
         )
 
         if not candidats:
-            raise gr.Error("Aucun passage exploitable trouvé.")
+            raise gr.Error(
+                "Aucun passage exploitable trouvé."
+            )
 
         selection = selectionner_passages(
             candidats,
@@ -515,9 +555,14 @@ def analyser_video(
         )
 
         if not selection:
-            raise gr.Error("Impossible de sélectionner des passages.")
+            raise gr.Error(
+                "Impossible de sélectionner des passages."
+            )
 
-        progress(0.70, desc="Création des clips...")
+        progress(
+            0.70,
+            desc="Création des clips..."
+        )
 
         resultats = []
 
@@ -554,10 +599,13 @@ def analyser_video(
                 desc=f"Clip {index + 1}/{total} terminé..."
             )
 
-        progress(1, desc="Terminé !")
+        progress(
+            1,
+            desc="Terminé !"
+        )
 
         message = (
-            f"✅ ClipIA a créé {len(resultats)} clip(s) !\n"
+            f"ClipIA a créé {len(resultats)} clip(s) !\n"
             f"Durée de la vidéo : {int(duree)} secondes.\n"
             f"Format : {format_video}."
         )
@@ -575,7 +623,10 @@ def analyser_video(
 
     except Exception as erreur:
 
-        print("Erreur ClipIA :", repr(erreur))
+        print(
+            "Erreur ClipIA :",
+            repr(erreur)
+        )
 
         raise gr.Error(
             f"Une erreur est survenue : {str(erreur)}"
@@ -605,8 +656,7 @@ with gr.Blocks(
 
         video = gr.Video(
             label="Choisis ta vidéo",
-            sources=["upload"],
-            type="filepath"
+            sources=["upload"]
         )
 
     with gr.Row():
@@ -673,4 +723,5 @@ if __name__ == "__main__":
             os.environ.get("PORT", 7860)
         ),
         theme=gr.themes.Soft()
-        )
+    )
+    
