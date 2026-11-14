@@ -93,7 +93,7 @@ else:
 
 selection = selection[:10]
 
-    clips = []
+clips = []
 
     for index, debut in enumerate(selection):
         sortie = os.path.join(
