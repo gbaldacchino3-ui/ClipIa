@@ -1,7 +1,9 @@
+
 import os
 import re
 import cv2
 import time
+import math
 import shutil
 import tempfile
 import subprocess
@@ -11,43 +13,62 @@ import imageio_ffmpeg
 from faster_whisper import WhisperModel
 
 # ============================================================
-# CLIPIA V5 — CONFIGURATION
+# CLIPIA V6 — CONFIGURATION GÉNÉRALE
 # ============================================================
+
+APP_NAME = "ClipIA V6"
 
 NOMBRE_MAX_CLIPS = 5
 DUREE_MIN_CLIP = 10
 DUREE_MAX_CLIP = 30
 
-DOSSIER_SORTIE = os.path.join(tempfile.gettempdir(), "clipia_v5")
+DUREE_TRANCHE_AUDIO = 600
+DEBIT_AUDIO = "64k"
+
+DOSSIER_SORTIE = os.path.join(
+    tempfile.gettempdir(),
+    "clipia_v6"
+)
+
 os.makedirs(DOSSIER_SORTIE, exist_ok=True)
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 MODELE_WHISPER = None
 
-FORMATS = {
-    "Original": "original",
-    "Vertical 9:16": "vertical",
-    "Carré 1:1": "carre",
-    "Horizontal 16:9": "horizontal"
-}
+FORMATS = [
+    "Original",
+    "Vertical 9:16",
+    "Carré 1:1",
+    "Horizontal 16:9"
+]
+
+# ============================================================
+# EMOJIS BUSINESS
+# ============================================================
 
 MOTS_BUSINESS = {
     "business": "💼",
     "entreprise": "🏢",
     "argent": "💰",
     "million": "💰",
+    "millions": "💰",
     "investissement": "📈",
     "investir": "📈",
+    "investisseur": "📈",
     "marketing": "📢",
     "client": "🤝",
+    "clients": "🤝",
     "vente": "🛒",
     "vendre": "🛒",
     "stratégie": "🎯",
     "strategie": "🎯",
     "objectif": "🎯",
+    "objectifs": "🎯",
     "succès": "🏆",
     "succes": "🏆",
+    "réussite": "🏆",
+    "reussite": "🏆",
     "équipe": "👥",
     "equipe": "👥",
     "travail": "💻",
@@ -67,11 +88,72 @@ MOTS_BUSINESS = {
     "communication": "🎤",
     "risque": "⚠️",
     "important": "⭐",
-    "attention": "⚠️"
+    "attention": "⚠️",
+    "conseil": "💡",
+    "conseils": "💡",
+    "problème": "⚠️",
+    "probleme": "⚠️",
+    "solution": "✅",
+    "formation": "🎓",
+    "apprendre": "📚",
+    "apprentissage": "📚",
+    "innovation": "💡",
+    "argent": "💰",
+    "revenu": "💰",
+    "revenus": "💰",
+    "vente": "🛒",
+    "vendre": "🛒"
 }
 
 # ============================================================
-# WHISPER
+# OUTILS GÉNÉRAUX
+# ============================================================
+
+def executer_commande(commande):
+    resultat = subprocess.run(
+        commande,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if resultat.returncode != 0:
+        erreur = resultat.stderr or "Erreur FFmpeg inconnue."
+        raise RuntimeError(erreur[-3000:])
+
+    return resultat
+
+
+def nettoyer_dossier():
+    os.makedirs(DOSSIER_SORTIE, exist_ok=True)
+
+    for nom in os.listdir(DOSSIER_SORTIE):
+        chemin = os.path.join(DOSSIER_SORTIE, nom)
+
+        try:
+            if os.path.isfile(chemin):
+                os.remove(chemin)
+            elif os.path.isdir(chemin):
+                shutil.rmtree(chemin)
+        except Exception:
+            pass
+
+
+def verifier_video(video):
+    if isinstance(video, dict):
+        video = video.get("path")
+
+    if not video:
+        raise gr.Error("Ajoute une vidéo.")
+
+    if not os.path.isfile(video):
+        raise gr.Error("Le fichier vidéo est introuvable.")
+
+    return video
+
+
+# ============================================================
+# CHARGEMENT WHISPER
 # ============================================================
 
 def charger_modele():
@@ -89,48 +171,51 @@ def charger_modele():
 
 
 # ============================================================
-# OUTILS
+# INFORMATIONS VIDÉO
 # ============================================================
 
-def executer_commande(command):
-    resultat = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-
-    if resultat.returncode != 0:
-        raise RuntimeError(resultat.stderr[-2500:])
-
-    return resultat
-
-
-def obtenir_infos_video(fichier):
-    capture = cv2.VideoCapture(fichier)
+def obtenir_infos_video(video):
+    capture = cv2.VideoCapture(video)
 
     if not capture.isOpened():
-        raise ValueError("Impossible de lire cette vidéo.")
+        raise RuntimeError(
+            "Impossible d'ouvrir la vidéo."
+        )
 
     fps = capture.get(cv2.CAP_PROP_FPS)
-    frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
-    largeur = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    hauteur = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    nombre_frames = capture.get(
+        cv2.CAP_PROP_FRAME_COUNT
+    )
+
+    largeur = int(
+        capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+    )
+
+    hauteur = int(
+        capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    )
 
     capture.release()
 
-    if fps <= 0:
-        raise ValueError("FPS vidéo invalide.")
+    if fps <= 0 or nombre_frames <= 0:
+        raise RuntimeError(
+            "Les informations de la vidéo sont invalides."
+        )
 
-    duree = frames / fps
+    duree = nombre_frames / fps
 
     return {
-        "duree": duree,
         "fps": fps,
+        "frames": nombre_frames,
         "largeur": largeur,
-        "hauteur": hauteur
+        "hauteur": hauteur,
+        "duree": duree
     }
 
+
+# ============================================================
+# EXTRACTION AUDIO COMPRESSÉE
+# ============================================================
 
 def extraire_audio(video, destination):
     executer_commande([
@@ -140,55 +225,157 @@ def extraire_audio(video, destination):
         "-vn",
         "-ac", "1",
         "-ar", "16000",
-        "-c:a", "pcm_s16le",
+        "-c:a", "libmp3lame",
+        "-b:a", DEBIT_AUDIO,
         destination
     ])
 
 
 # ============================================================
-# TRANSCRIPTION
+# TRANSCRIPTION PAR TRANCHES DE 10 MINUTES
 # ============================================================
 
-def transcrire_audio(audio):
+def transcrire_audio(
+    audio,
+    duree_video,
+    progress=None
+):
     modele = charger_modele()
 
-    segments, informations = modele.transcribe(
-        audio,
-        beam_size=1,
-        vad_filter=True
+    tous_les_segments = []
+
+    nombre_tranches = max(
+        1,
+        math.ceil(
+            duree_video / DUREE_TRANCHE_AUDIO
+        )
     )
 
-    resultat = []
+    for numero in range(nombre_tranches):
 
-    for segment in segments:
-        texte = segment.text.strip()
+        debut_tranche = (
+            numero * DUREE_TRANCHE_AUDIO
+        )
 
-        if texte:
-            resultat.append({
-                "debut": float(segment.start),
-                "fin": float(segment.end),
+        duree_restante = (
+            duree_video - debut_tranche
+        )
+
+        duree_actuelle = min(
+            DUREE_TRANCHE_AUDIO,
+            duree_restante
+        )
+
+        if duree_actuelle <= 0:
+            break
+
+        fichier_tranche = os.path.join(
+            DOSSIER_SORTIE,
+            f"tranche_{numero + 1}.mp3"
+        )
+
+        if progress:
+            avancement = (
+                0.22
+                + 0.32 * (
+                    numero / nombre_tranches
+                )
+            )
+
+            progress(
+                avancement,
+                desc=(
+                    f"Transcription "
+                    f"{numero + 1}/{nombre_tranches} "
+                    f"— {int(debut_tranche / 60)} min"
+                )
+            )
+
+        executer_commande([
+            FFMPEG,
+            "-y",
+            "-ss", str(debut_tranche),
+            "-i", audio,
+            "-t", str(duree_actuelle),
+            "-vn",
+            "-ac", "1",
+            "-ar", "16000",
+            "-c:a", "libmp3lame",
+            "-b:a", DEBIT_AUDIO,
+            fichier_tranche
+        ])
+
+        segments, informations = modele.transcribe(
+            fichier_tranche,
+            beam_size=1,
+            vad_filter=True,
+            language="fr"
+        )
+
+        for segment in segments:
+            texte = segment.text.strip()
+
+            if not texte:
+                continue
+
+            tous_les_segments.append({
+                "debut": (
+                    float(segment.start)
+                    + debut_tranche
+                ),
+                "fin": (
+                    float(segment.end)
+                    + debut_tranche
+                ),
                 "texte": texte
             })
 
-    return resultat
+        try:
+            os.remove(fichier_tranche)
+        except Exception:
+            pass
+
+    return tous_les_segments
 
 
 # ============================================================
-# SÉLECTION DES PASSAGES
+# ANALYSE DES TEXTES
 # ============================================================
 
 def calculer_score(texte):
     texte_min = texte.lower()
-    score = 0
 
     mots_importants = [
-        "mais", "pourquoi", "comment", "résultat",
-        "argent", "business", "million", "erreur",
-        "réussite", "succès", "stratégie", "important",
-        "incroyable", "jamais", "toujours", "secret",
-        "conseil", "apprendre", "entreprise",
-        "investissement", "client", "problème"
+        "business",
+        "argent",
+        "million",
+        "investissement",
+        "entreprise",
+        "succès",
+        "réussite",
+        "stratégie",
+        "marketing",
+        "client",
+        "vente",
+        "entrepreneur",
+        "objectif",
+        "résultat",
+        "secret",
+        "conseil",
+        "erreur",
+        "problème",
+        "solution",
+        "important",
+        "incroyable",
+        "jamais",
+        "toujours",
+        "apprendre",
+        "travail",
+        "croissance",
+        "productivité"
     ]
+
+    score = 0
 
     for mot in mots_importants:
         if mot in texte_min:
@@ -203,77 +390,97 @@ def calculer_score(texte):
     if len(texte) > 100:
         score += 2
 
+    if len(texte) > 200:
+        score += 2
+
     return score
 
 
-def construire_candidats(segments, duree_video):
+# ============================================================
+# CONSTRUCTION DES PASSAGES CANDIDATS
+# ============================================================
+
+def construire_candidats(
+    segments,
+    duree_video
+):
     candidats = []
 
     if not segments:
         return candidats
 
-    index = 0
+    for index, segment_depart in enumerate(segments):
 
-    while index < len(segments):
-        debut = segments[index]["debut"]
-        fin = debut
+        debut = segment_depart["debut"]
+
         textes = []
         score = 0
+        fin = debut
 
-        j = index
+        for segment in segments[index:]:
 
-        while j < len(segments):
-            segment = segments[j]
-
-            nouvelle_fin = segment["fin"]
-
-            if nouvelle_fin - debut > DUREE_MAX_CLIP:
+            if segment["debut"] - debut > DUREE_MAX_CLIP:
                 break
 
-            if nouvelle_fin - debut >= DUREE_MIN_CLIP:
-                if j > index and (
-                    segment["debut"] - fin > 3
-                ):
-                    break
+            if (
+                segment["debut"] - fin > 5
+                and textes
+            ):
+                break
 
             textes.append(segment["texte"])
-            score += calculer_score(segment["texte"])
-            fin = nouvelle_fin
-            j += 1
 
-            if fin - debut >= DUREE_MIN_CLIP:
-                texte_complet = " ".join(textes)
+            score += calculer_score(
+                segment["texte"]
+            )
+
+            fin = segment["fin"]
+
+            duree = fin - debut
+
+            if duree >= DUREE_MIN_CLIP:
+
+                if duree > DUREE_MAX_CLIP:
+                    break
 
                 candidats.append({
                     "debut": max(0, debut),
                     "fin": min(duree_video, fin),
                     "score": score,
-                    "texte": texte_complet
+                    "texte": " ".join(textes)
                 })
 
                 break
 
-        index = max(index + 1, j)
-
     return candidats
 
 
-def selectionner_clips(candidats, duree_video, nombre):
+# ============================================================
+# SÉLECTION DES MEILLEURS CLIPS
+# ============================================================
+
+def selectionner_clips(
+    candidats,
+    duree_video,
+    nombre
+):
+    selection = []
+
     candidats = sorted(
         candidats,
         key=lambda x: x["score"],
         reverse=True
     )
 
-    selection = []
-
     for candidat in candidats:
+
         debut = candidat["debut"]
         fin = candidat["fin"]
 
         chevauchement = False
 
         for choisi in selection:
+
             if not (
                 fin <= choisi["debut"]
                 or debut >= choisi["fin"]
@@ -287,28 +494,31 @@ def selectionner_clips(candidats, duree_video, nombre):
         if len(selection) >= nombre:
             break
 
-    # Si Whisper n'a pas trouvé assez de passages,
-    # on complète avec des segments répartis dans la vidéo.
+    # Compléter si Whisper n'a pas trouvé assez
+    # de passages suffisamment longs.
 
     if len(selection) < nombre:
+
         duree_clip = min(
             DUREE_MAX_CLIP,
-            max(DUREE_MIN_CLIP, duree_video / max(nombre, 1))
+            duree_video
         )
 
-        positions = []
-
         if duree_video > duree_clip:
-            espace = (duree_video - duree_clip) / max(nombre, 1)
-
-            for i in range(nombre):
-                positions.append(i * espace)
+            espace = (
+                duree_video - duree_clip
+            ) / max(nombre, 1)
         else:
-            positions.append(0)
+            espace = 0
 
-        for position in positions:
-            debut = max(0, position)
-            fin = min(duree_video, debut + duree_clip)
+        for index in range(nombre):
+
+            debut = index * espace
+
+            fin = min(
+                duree_video,
+                debut + duree_clip
+            )
 
             if fin - debut < DUREE_MIN_CLIP:
                 continue
@@ -322,10 +532,10 @@ def selectionner_clips(candidats, duree_video, nombre):
 
             chevauchement = any(
                 not (
-                    fin <= x["debut"]
-                    or debut >= x["fin"]
+                    fin <= choisi["debut"]
+                    or debut >= choisi["fin"]
                 )
-                for x in selection
+                for choisi in selection
             )
 
             if not chevauchement:
@@ -334,22 +544,38 @@ def selectionner_clips(candidats, duree_video, nombre):
             if len(selection) >= nombre:
                 break
 
-    return sorted(selection, key=lambda x: x["debut"])[:nombre]
+    return sorted(
+        selection,
+        key=lambda x: x["debut"]
+    )[:nombre]
 
 
 # ============================================================
-# SOUS-TITRES ET EMOJIS
+# SOUS-TITRES ASS
 # ============================================================
 
 def temps_ass(secondes):
+    secondes = max(0, secondes)
+
     heures = int(secondes // 3600)
-    minutes = int((secondes % 3600) // 60)
-    secondes_entieres = int(secondes % 60)
-    centiemes = int((secondes - int(secondes)) * 100)
+
+    minutes = int(
+        (secondes % 3600) // 60
+    )
+
+    secondes_entieres = int(
+        secondes % 60
+    )
+
+    centiemes = int(
+        (secondes - int(secondes)) * 100
+    )
 
     return (
-        f"{heures}:{minutes:02d}:"
-        f"{secondes_entieres:02d}.{centiemes:02d}"
+        f"{heures}:"
+        f"{minutes:02d}:"
+        f"{secondes_entieres:02d}."
+        f"{centiemes:02d}"
     )
 
 
@@ -358,14 +584,22 @@ def echapper_ass(texte):
     texte = texte.replace("{", "\\{")
     texte = texte.replace("}", "\\}")
     texte = texte.replace("\n", " ")
+
     return texte
 
 
 def trouver_emoji(texte):
-    texte = texte.lower()
+    texte_min = texte.lower()
 
     for mot, emoji in MOTS_BUSINESS.items():
-        if re.search(r"\b" + re.escape(mot) + r"\b", texte):
+
+        expression = (
+            r"\b"
+            + re.escape(mot)
+            + r"\b"
+        )
+
+        if re.search(expression, texte_min):
             return emoji
 
     return None
@@ -373,16 +607,22 @@ def trouver_emoji(texte):
 
 def creer_fichier_ass(
     segments,
-    debut_clip,
-    fin_clip,
+    clip,
     destination,
     largeur,
     hauteur,
     sous_titres_actifs,
     emojis_actifs
 ):
-    taille = max(24, int(hauteur * 0.027))
-    marge = max(35, int(hauteur * 0.055))
+    taille = max(
+        24,
+        int(hauteur * 0.027)
+    )
+
+    marge = max(
+        35,
+        int(hauteur * 0.055)
+    )
 
     contenu = f"""[Script Info]
 ScriptType: v4.00+
@@ -400,69 +640,113 @@ Style: Emoji,DejaVu Sans,{int(taille * 1.8)},&H00FFFFFF,&H000000FF,&H00000000,&H
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
+    debut_clip = clip["debut"]
+    fin_clip = clip["fin"]
+
     for segment in segments:
-        debut = max(0, segment["debut"] - debut_clip)
+
+        if (
+            segment["fin"] <= debut_clip
+            or segment["debut"] >= fin_clip
+        ):
+            continue
+
+        debut = max(
+            0,
+            segment["debut"] - debut_clip
+        )
+
         fin = min(
             fin_clip - debut_clip,
             segment["fin"] - debut_clip
         )
 
-        if fin <= 0 or debut >= fin_clip - debut_clip:
+        if fin <= debut:
             continue
 
-        debut = max(0, debut)
-        fin = max(debut + 0.2, fin)
-
-        texte = echapper_ass(segment["texte"])
+        texte = echapper_ass(
+            segment["texte"]
+        )
 
         if sous_titres_actifs:
+
             contenu += (
-                f"Dialogue: 0,{temps_ass(debut)},"
-                f"{temps_ass(fin)},SousTitre,,0,0,0,,"
+                f"Dialogue: 0,"
+                f"{temps_ass(debut)},"
+                f"{temps_ass(fin)},"
+                f"SousTitre,,0,0,0,,"
                 f"{texte}\n"
             )
 
         if emojis_actifs:
-            emoji = trouver_emoji(segment["texte"])
+
+            emoji = trouver_emoji(
+                segment["texte"]
+            )
 
             if emoji:
+
                 contenu += (
-                    f"Dialogue: 1,{temps_ass(debut)},"
-                    f"{temps_ass(fin)},Emoji,,0,0,0,,"
+                    f"Dialogue: 1,"
+                    f"{temps_ass(debut)},"
+                    f"{temps_ass(fin)},"
+                    f"Emoji,,0,0,0,,"
                     f"{emoji}\n"
                 )
 
-    with open(destination, "w", encoding="utf-8") as fichier:
+    with open(
+        destination,
+        "w",
+        encoding="utf-8"
+    ) as fichier:
+
         fichier.write(contenu)
 
 
 # ============================================================
-# FORMAT VIDÉO
+# FORMATS VIDÉO
 # ============================================================
 
-def filtre_format(format_video, largeur_originale, hauteur_originale):
+def obtenir_filtre_format(
+    format_video,
+    largeur_originale,
+    hauteur_originale
+):
     if format_video == "Vertical 9:16":
-        largeur, hauteur = 1080, 1920
+
+        largeur = 1080
+        hauteur = 1920
+
         filtre = (
-            "scale=1080:1920:force_original_aspect_ratio=increase,"
+            "scale=1080:1920:"
+            "force_original_aspect_ratio=increase,"
             "crop=1080:1920"
         )
 
     elif format_video == "Carré 1:1":
-        largeur, hauteur = 1080, 1080
+
+        largeur = 1080
+        hauteur = 1080
+
         filtre = (
-            "scale=1080:1080:force_original_aspect_ratio=increase,"
+            "scale=1080:1080:"
+            "force_original_aspect_ratio=increase,"
             "crop=1080:1080"
         )
 
     elif format_video == "Horizontal 16:9":
-        largeur, hauteur = 1920, 1080
+
+        largeur = 1920
+        hauteur = 1080
+
         filtre = (
-            "scale=1920:1080:force_original_aspect_ratio=increase,"
+            "scale=1920:1080:"
+            "force_original_aspect_ratio=increase,"
             "crop=1920:1080"
         )
 
     else:
+
         largeur = largeur_originale
         hauteur = hauteur_originale
 
@@ -475,14 +759,29 @@ def filtre_format(format_video, largeur_originale, hauteur_originale):
         filtre = (
             f"scale={largeur}:{hauteur}:"
             "force_original_aspect_ratio=decrease,"
-            f"pad={largeur}:{hauteur}:(ow-iw)/2:(oh-ih)/2"
+            f"pad={largeur}:{hauteur}:"
+            "(ow-iw)/2:(oh-ih)/2"
         )
 
     return filtre, largeur, hauteur
 
 
 # ============================================================
-# CRÉATION D'UN CLIP
+# FILTRE SOUS-TITRES
+# ============================================================
+
+def preparer_chemin_ass(chemin):
+    chemin = os.path.abspath(chemin)
+
+    chemin = chemin.replace("\\", "/")
+    chemin = chemin.replace(":", "\\:")
+    chemin = chemin.replace("'", "\\'")
+
+    return chemin
+
+
+# ============================================================
+# CRÉATION DES CLIPS
 # ============================================================
 
 def creer_clip(
@@ -496,20 +795,31 @@ def creer_clip(
     segments
 ):
     debut = clip["debut"]
-    duree = clip["fin"] - clip["debut"]
 
-    nom = f"ClipIA_V5_{numero}.mp4"
-    destination = os.path.join(DOSSIER_SORTIE, nom)
+    duree = (
+        clip["fin"] - clip["debut"]
+    )
 
-    filtre, largeur, hauteur = filtre_format(
-        format_video,
-        infos["largeur"],
-        infos["hauteur"]
+    destination = os.path.join(
+        DOSSIER_SORTIE,
+        f"ClipIA_V6_{numero}.mp4"
+    )
+
+    filtre, largeur, hauteur = (
+        obtenir_filtre_format(
+            format_video,
+            infos["largeur"],
+            infos["hauteur"]
+        )
     )
 
     filtres = [filtre]
 
-    if sous_titres_actifs or emojis_actifs:
+    if (
+        sous_titres_actifs
+        or emojis_actifs
+    ):
+
         fichier_ass = os.path.join(
             DOSSIER_SORTIE,
             f"sous_titres_{numero}.ass"
@@ -517,8 +827,7 @@ def creer_clip(
 
         creer_fichier_ass(
             segments,
-            debut,
-            clip["fin"],
+            clip,
             fichier_ass,
             largeur,
             hauteur,
@@ -526,10 +835,13 @@ def creer_clip(
             emojis_actifs
         )
 
-        chemin_ass = fichier_ass.replace("\\", "/")
-        chemin_ass = chemin_ass.replace(":", "\\:")
+        chemin_ass = preparer_chemin_ass(
+            fichier_ass
+        )
 
-        filtres.append(f"ass='{chemin_ass}'")
+        filtres.append(
+            f"ass='{chemin_ass}'"
+        )
 
     filtre_final = ",".join(filtres)
 
@@ -555,11 +867,21 @@ def creer_clip(
 
     executer_commande(commande)
 
+    if not os.path.exists(destination):
+        raise RuntimeError(
+            "Le clip n'a pas été créé."
+        )
+
+    if os.path.getsize(destination) == 0:
+        raise RuntimeError(
+            "Le fichier vidéo créé est vide."
+        )
+
     return destination
 
 
 # ============================================================
-# TRAITEMENT PRINCIPAL
+# GÉNÉRATION PRINCIPALE
 # ============================================================
 
 def generer_clips(
@@ -570,239 +892,56 @@ def generer_clips(
     emojis_actifs,
     progress=gr.Progress()
 ):
-    if video is None:
-        raise gr.Error("Ajoute une vidéo avant de commencer.")
+    debut_traitement = time.time()
 
-    if isinstance(video, dict):
-        video = video.get("path")
-
-    if not video or not os.path.exists(video):
-        raise gr.Error("Fichier vidéo introuvable.")
+    video = verifier_video(video)
 
     nombre_clips = int(nombre_clips)
 
     nombre_clips = max(
         1,
-        min(NOMBRE_MAX_CLIPS, nombre_clips)
+        min(
+            NOMBRE_MAX_CLIPS,
+            nombre_clips
+        )
     )
 
-    for fichier in os.listdir(DOSSIER_SORTIE):
-        chemin = os.path.join(DOSSIER_SORTIE, fichier)
-
-        try:
-            if os.path.isfile(chemin):
-                os.remove(chemin)
-            elif os.path.isdir(chemin):
-                shutil.rmtree(chemin)
-        except Exception:
-            pass
+    nettoyer_dossier()
 
     try:
-        progress(0.05, desc="Analyse de la vidéo...")
+
+        # --------------------------------------------
+        # ÉTAPE 1 : INFORMATIONS VIDÉO
+        # --------------------------------------------
+
+        progress(
+            0.03,
+            desc="Analyse de la vidéo..."
+        )
 
         infos = obtenir_infos_video(video)
 
         if infos["duree"] < DUREE_MIN_CLIP:
+
             raise gr.Error(
-                "La vidéo est trop courte pour créer un clip."
+                "La vidéo est trop courte."
             )
 
-        progress(0.12, desc="Extraction de l'audio...")
+        # --------------------------------------------
+        # ÉTAPE 2 : EXTRACTION AUDIO
+        # --------------------------------------------
 
-        audio = os.path.join(
-            DOSSIER_SORTIE,
-            "audio_temp.wav"
+        progress(
+            0.10,
+            desc="Extraction audio compressée..."
         )
 
-        extraire_audio(video, audio)
-
-        progress(0.25, desc="Transcription avec Whisper...")
-
-        segments = transcrire_audio(audio)
-
-        progress(0.55, desc="Recherche des meilleurs passages...")
-
-        candidats = construire_candidats(
-            segments,
-            infos["duree"]
-        )
-
-        clips = selectionner_clips(
-            candidats,
-            infos["duree"],
-            nombre_clips
-        )
-
-        if not clips:
-            raise gr.Error(
-                "Aucun passage exploitable n'a été trouvé."
-            )
-
-        resultats = []
-
-        for index, clip in enumerate(clips):
-            progression = 0.60 + (
-                0.38 * (index / max(len(clips), 1))
-            )
-
-            progress(
-                progression,
-                desc=f"Création du clip {index + 1}/{len(clips)}..."
-            )
-
-            resultat = creer_clip(
-                video,
-                infos,
-                clip,
-                index + 1,
-                format_video,
-                sous_titres_actifs,
-                emojis_actifs,
-                segments
-            )
-
-            resultats.append(resultat)
-
-        progress(1, desc="Terminé !")
-
-        try:
-            os.remove(audio)
-        except Exception:
-            pass
-
-        return resultats, (
-            f"✅ {len(resultats)} clip(s) créé(s) avec succès !"
-        )
-
-    except gr.Error:
-        raise
-
-    except Exception as erreur:
-        raise gr.Error(
-            "Une erreur est survenue :\n"
-            + str(erreur)[-1800:]
-        )
-
-
-# ============================================================
-# INTERFACE CLIPIA V5
-# ============================================================
-
-CSS = """
-.gradio-container {
-    max-width: 1050px !important;
-    margin: auto !important;
-}
-
-#titre {
-    text-align: center;
-    margin-bottom: 5px;
-}
-
-#description {
-    text-align: center;
-    opacity: 0.8;
-}
-
-#generer {
-    background: #16a34a !important;
-    color: white !important;
-    font-weight: bold !important;
-    min-height: 55px;
-    font-size: 18px !important;
-}
-
-#statut {
-    text-align: center;
-    font-weight: bold;
-}
-"""
-
-with gr.Blocks() as application:
-
-    gr.Markdown(
-        "# 🎬 ClipIA V5",
-        elem_id="titre"
-    )
-
-    gr.Markdown(
-        "Transforme automatiquement tes podcasts en clips courts.",
-        elem_id="description"
-    )
-
-    with gr.Row():
-        video = gr.Video(
-            label="📁 Importer une vidéo",
-            sources=["upload"]
-        )
-
-    with gr.Row():
-        nombre_clips = gr.Slider(
-            minimum=1,
-            maximum=NOMBRE_MAX_CLIPS,
-            value=3,
-            step=1,
-            label="Nombre de clips à créer"
-        )
-
-        format_video = gr.Dropdown(
-            choices=list(FORMATS.keys()),
-            value="Vertical 9:16",
-            label="Format vidéo"
-        )
-
-    gr.Markdown("### Personnalisation")
-
-    with gr.Row():
-        sous_titres_actifs = gr.Checkbox(
-            value=True,
-            label="📝 Activer les sous-titres"
-        )
-
-        emojis_actifs = gr.Checkbox(
-            value=True,
-            label="💼 Activer les emojis business"
-        )
-
-    generer = gr.Button(
-        "🚀 GÉNÉRER MES CLIPS",
-        elem_id="generer"
-    )
-
-    statut = gr.Markdown(
-        "En attente d'une vidéo.",
-        elem_id="statut"
-    )
-
-    resultats = gr.Files(
-        label="🎥 Tes clips terminés"
-    )
-
-    generer.click(
-        fn=generer_clips,
-        inputs=[
-            video,
-            nombre_clips,
-            format_video,
-            sous_titres_actifs,
-            emojis_actifs
-        ],
-        outputs=[
-            resultats,
-            statut
-        ]
-    )
-
-
-# ============================================================
-# LANCEMENT
-# ============================================================
-
-if __name__ == "__main__":
-    application.launch(
-        server_name="0.0.0.0",
-        server_port=int(os.environ.get("PORT", 7860)),
-        show_error=True,
-        css=CSS
-    )
+  
     
+        
+    
+        
+    
+
+        
+            
