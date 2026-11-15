@@ -1,140 +1,100 @@
 
 import os
+import re
 import cv2
-import subprocess
+import time
+import shutil
 import tempfile
+import subprocess
 import gradio as gr
 import imageio_ffmpeg
+
 from faster_whisper import WhisperModel
 
 # ============================================================
-# CONFIGURATION
+# CLIPIA — CONFIGURATION
 # ============================================================
 
 NOMBRE_MAX_CLIPS = 5
 DUREE_MAX_CLIP = 30
+DUREE_MIN_CLIP = 10
 INTERVALLE_ANALYSE = 4
-MODELE_WHISPER = "tiny"
 
-modele_whisper = None
+DOSSIER_SORTIE = os.path.join(tempfile.gettempdir(), "clipia_output")
+os.makedirs(DOSSIER_SORTIE, exist_ok=True)
 
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
-# ============================================================
-# WHISPER
-# ============================================================
-
-def charger_whisper():
-    global modele_whisper
-
-    if modele_whisper is None:
-        modele_whisper = WhisperModel(
-            MODELE_WHISPER,
-            device="cpu",
-            compute_type="int8",
-            cpu_threads=2,
-            num_workers=1
-        )
-
-    return modele_whisper
+# Chargement du modèle une seule fois
+print("Chargement de Whisper...")
+modele_whisper = WhisperModel(
+    "tiny",
+    device="cpu",
+    compute_type="int8",
+    cpu_threads=2
+)
+print("Whisper est prêt !")
 
 
 # ============================================================
-# VERIFICATION VIDEO
+# OUTILS
 # ============================================================
 
-def verifier_video(video):
-    if video is None:
-        raise gr.Error("Ajoute d'abord une vidéo.")
+def nettoyer_dossier():
+    """Nettoie les anciens clips générés."""
+    try:
+        for fichier in os.listdir(DOSSIER_SORTIE):
+            chemin = os.path.join(DOSSIER_SORTIE, fichier)
+            if os.path.isfile(chemin):
+                os.remove(chemin)
+    except Exception:
+        pass
 
-    if isinstance(video, dict):
-        video = video.get("path") or video.get("name")
-
-    if not isinstance(video, str) or not os.path.isfile(video):
-        raise gr.Error("Le fichier vidéo est introuvable.")
-
-    if os.path.getsize(video) == 0:
-        raise gr.Error("Le fichier vidéo est vide.")
-
-    return video
-
-
-# ============================================================
-# INFORMATIONS VIDEO
-# ============================================================
 
 def obtenir_infos_video(video):
+    """Récupère les informations principales de la vidéo."""
+
     capture = cv2.VideoCapture(video)
 
     if not capture.isOpened():
-        capture.release()
         raise gr.Error("Impossible d'ouvrir cette vidéo.")
 
     fps = capture.get(cv2.CAP_PROP_FPS)
-    total_frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+    nombre_images = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+    largeur = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+    hauteur = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
     capture.release()
 
-    if fps <= 0 or total_frames <= 0:
-        raise gr.Error("Impossible de lire les informations vidéo.")
+    if not fps or fps <= 0:
+        raise gr.Error("Impossible de déterminer les FPS de la vidéo.")
 
-    return fps, int(total_frames), total_frames / fps
+    duree = nombre_images / fps if nombre_images else 0
+
+    if duree <= 0:
+        raise gr.Error("La durée de la vidéo est invalide.")
+
+    return {
+        "fps": fps,
+        "duree": duree,
+        "largeur": int(largeur),
+        "hauteur": int(hauteur),
+        "nombre_images": int(nombre_images)
+    }
 
 
 # ============================================================
-# EXTRACTION AUDIO
+# ANALYSE AUDIO AVEC WHISPER
 # ============================================================
 
-def extraire_audio(video, dossier):
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    audio = os.path.join(dossier, "audio.wav")
+def analyser_audio(video, progress=gr.Progress()):
+    """Transcrit l'audio et récupère les passages intéressants."""
 
-    commande = [
-        ffmpeg,
-        "-y",
-        "-i", video,
-        "-vn",
-        "-ac", "1",
-        "-ar", "16000",
-        "-acodec", "pcm_s16le",
-        "-threads", "2",
-        audio
-    ]
+    progress(0.05, desc="Analyse de l'audio...")
 
     try:
-        resultat = subprocess.run(
-            commande,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-
-    except subprocess.TimeoutExpired:
-        print("Extraction audio trop longue.")
-        return None
-
-    if resultat.returncode != 0:
-        print("Erreur audio :", resultat.stderr[-1000:])
-        return None
-
-    if not os.path.isfile(audio) or os.path.getsize(audio) == 0:
-        return None
-
-    return audio
-
-
-# ============================================================
-# ANALYSE AUDIO
-# ============================================================
-
-def analyser_audio(audio, duree):
-    if audio is None:
-        return []
-
-    try:
-        modele = charger_whisper()
-
-        segments, informations = modele.transcribe(
-            audio,
+        segments, informations = modele_whisper.transcribe(
+            video,
             language="fr",
             beam_size=1,
             best_of=1,
@@ -142,7 +102,7 @@ def analyser_audio(audio, duree):
             condition_on_previous_text=False
         )
 
-        passages = []
+        resultats = []
 
         for segment in segments:
             texte = segment.text.strip()
@@ -150,281 +110,386 @@ def analyser_audio(audio, duree):
             if not texte:
                 continue
 
-            debut = max(0, float(segment.start))
-            fin = min(duree, float(segment.end))
-
-            if fin <= debut:
-                continue
-
-            score = min(len(texte.split()) * 1.5, 20)
-
-            if "!" in texte:
-                score += 8
-
-            if "?" in texte:
-                score += 5
-
-            if texte.isupper() and len(texte) > 5:
-                score += 5
-
-            score += max(
-                0,
-                10 - float(segment.no_speech_prob) * 10
-            )
-
-            passages.append({
-                "debut": debut,
-                "fin": fin,
-                "score": score,
+            resultats.append({
+                "debut": float(segment.start),
+                "fin": float(segment.end),
                 "texte": texte
             })
 
-        return passages
+        progress(0.25, desc="Analyse audio terminée")
+
+        return resultats
 
     except Exception as erreur:
-        print("Erreur Whisper :", repr(erreur))
+        print("Erreur Whisper :", erreur)
         return []
 
 
 # ============================================================
-# ANALYSE VISUELLE OPTIMISEE
+# ANALYSE VISUELLE
 # ============================================================
 
-def analyser_visuellement(video, fps, total_frames, duree):
+def analyser_visuellement(video, informations, progress=gr.Progress()):
+    """
+    Analyse des images à intervalles réguliers.
+    Utilise une recherche directe par timestamp pour éviter
+    de lire inutilement toutes les images.
+    """
+
     capture = cv2.VideoCapture(video)
 
     if not capture.isOpened():
-        return []
+        raise gr.Error("Impossible d'analyser les images.")
 
+    duree = informations["duree"]
     resultats = []
-    ancienne_image = None
 
-    intervalle_frames = max(
-        1,
-        int(fps * INTERVALLE_ANALYSE)
-    )
+    nombre_points = max(1, int(duree / INTERVALLE_ANALYSE))
 
-    numero_frame = 0
-    temps_suivant = 0
+    for index in range(nombre_points + 1):
 
-    try:
-        while True:
-            ok, image = capture.read()
+        temps = min(index * INTERVALLE_ANALYSE, duree)
 
-            if not ok:
-                break
+        capture.set(
+            cv2.CAP_PROP_POS_MSEC,
+            temps * 1000
+        )
 
-            if numero_frame % intervalle_frames == 0:
-                temps = numero_frame / fps
+        succes, image = capture.read()
 
-                if temps > duree:
-                    break
+        if not succes or image is None:
+            continue
 
-                image = cv2.resize(
-                    image,
-                    (320, 180),
-                    interpolation=cv2.INTER_AREA
-                )
+        image_reduite = cv2.resize(
+            image,
+            (320, 180)
+        )
 
-                gris = cv2.cvtColor(
-                    image,
-                    cv2.COLOR_BGR2GRAY
-                )
+        gris = cv2.cvtColor(
+            image_reduite,
+            cv2.COLOR_BGR2GRAY
+        )
 
-                nettete = cv2.Laplacian(
-                    gris,
-                    cv2.CV_64F
-                ).var()
+        nettete = cv2.Laplacian(
+            gris,
+            cv2.CV_64F
+        ).var()
 
-                mouvement = 0
+        contraste = gris.std()
 
-                if ancienne_image is not None:
-                    difference = cv2.absdiff(
-                        gris,
-                        ancienne_image
-                    )
+        luminosite = gris.mean()
 
-                    mouvement = float(difference.mean())
+        score = 0
 
-                score = min(nettete / 15, 20)
-                score += min(mouvement * 1.5, 20)
+        # Netteté
+        score += min(nettete / 10, 30)
 
-                resultats.append({
-                    "temps": temps,
-                    "score": score
-                })
+        # Contraste
+        score += min(contraste / 3, 25)
 
-                ancienne_image = gris.copy()
+        # Luminosité
+        if 50 < luminosite < 210:
+            score += 20
 
-            numero_frame += 1
+        # Mouvement approximatif entre images
+        if resultats:
+            difference = cv2.absdiff(
+                gris,
+                resultats[-1]["image"]
+            )
 
-    finally:
-        capture.release()
+            mouvement = difference.mean()
+            score += min(mouvement * 1.5, 25)
+
+        resultats.append({
+            "temps": temps,
+            "score": score,
+            "image": gris
+        })
+
+        progress(
+            0.25 + 0.25 * (index + 1) / nombre_points,
+            desc=f"Analyse visuelle : {index + 1}/{nombre_points}"
+        )
+
+    capture.release()
+
+    # On ne conserve pas les images en mémoire
+    for resultat in resultats:
+        resultat.pop("image", None)
 
     return resultats
 
 
 # ============================================================
-# CALCUL SCORE
+# ANALYSE DES MOMENTS INTÉRESSANTS
 # ============================================================
 
-def calculer_score(debut, fin, audio, visuel):
+def calculer_score_audio(texte):
+    """Attribue un score selon les mots présents dans la transcription."""
+
+    texte = texte.lower()
+
+    mots_interessants = [
+        "incroyable",
+        "impossible",
+        "attends",
+        "quoi",
+        "pourquoi",
+        "comment",
+        "haha",
+        "mdr",
+        "wow",
+        "oh",
+        "non",
+        "oui",
+        "sérieux",
+        "jamais",
+        "énorme",
+        "attention",
+        "regarde",
+        "surprise",
+        "problème",
+        "réussi",
+        "raté",
+        "drôle",
+        "mort de rire"
+    ]
+
     score = 0
 
-    for passage in audio:
-        milieu = (passage["debut"] + passage["fin"]) / 2
+    for mot in mots_interessants:
+        if mot in texte:
+            score += 8
 
-        if debut <= milieu <= fin:
-            score += passage["score"]
+    if "!" in texte:
+        score += 5
 
-    for image in visuel:
-        if debut <= image["temps"] <= fin:
-            score += image["score"]
+    if "?" in texte:
+        score += 3
 
     return score
 
 
-# ============================================================
-# RECHERCHE DES MEILLEURS PASSAGES
-# ============================================================
+def trouver_score_visuel(temps, analyses):
+    """Trouve le score visuel le plus proche d'un instant."""
 
-def creer_candidats(duree, audio, visuel, nombre):
-    candidats = []
+    if not analyses:
+        return 0
 
-    taille_zone = duree / nombre
-
-    if taille_zone < 2:
-        raise gr.Error(
-            "La vidéo est trop courte pour ce nombre de clips."
-        )
-
-    duree_clip = min(
-        DUREE_MAX_CLIP,
-        taille_zone
+    resultat = min(
+        analyses,
+        key=lambda element: abs(element["temps"] - temps)
     )
 
-    pas = max(1, duree_clip / 5)
+    return resultat["score"]
 
-    for zone in range(nombre):
-        debut_zone = zone * taille_zone
-        fin_zone = min(
-            (zone + 1) * taille_zone,
-            duree
+
+def construire_moments(audio, visuel, duree):
+    """Combine les analyses audio et visuelle."""
+
+    moments = []
+
+    for segment in audio:
+
+        milieu = (
+            segment["debut"] + segment["fin"]
+        ) / 2
+
+        score_audio = calculer_score_audio(
+            segment["texte"]
         )
 
-        dernier_debut = max(
-            debut_zone,
-            fin_zone - duree_clip
+        score_visuel = trouver_score_visuel(
+            milieu,
+            visuel
         )
 
-        debuts = []
-        temps = debut_zone
+        score_total = score_audio + score_visuel
 
-        while temps <= dernier_debut + 0.01:
-            debuts.append(temps)
-            temps += pas
+        moments.append({
+            "debut": segment["debut"],
+            "fin": segment["fin"],
+            "milieu": milieu,
+            "score": score_total,
+            "texte": segment["texte"]
+        })
 
-        if (
-            not debuts
-            or abs(debuts[-1] - dernier_debut) > 0.1
-        ):
-            debuts.append(dernier_debut)
+    # Si Whisper n'a trouvé aucun texte, on utilise l'analyse visuelle
+    if not moments:
+        for element in visuel:
+            moments.append({
+                "debut": element["temps"],
+                "fin": element["temps"],
+                "milieu": element["temps"],
+                "score": element["score"],
+                "texte": ""
+            })
 
-        meilleur = None
+    moments.sort(
+        key=lambda element: element["score"],
+        reverse=True
+    )
 
-        for debut in debuts:
-            fin = min(debut + duree_clip, duree)
-
-            score = calculer_score(
-                debut,
-                fin,
-                audio,
-                visuel
-            )
-
-            candidat = {
-                "debut": debut,
-                "fin": fin,
-                "score": score,
-                "zone": zone
-            }
-
-            if meilleur is None or score > meilleur["score"]:
-                meilleur = candidat
-
-        if meilleur is not None:
-            candidats.append(meilleur)
-
-    return candidats
+    return moments
 
 
 # ============================================================
-# SELECTION DES CLIPS
+# SÉLECTION DES CLIPS
 # ============================================================
 
-def selectionner_passages(candidats, nombre):
-    selection = []
+def selectionner_clips(moments, duree_video, nombre_clips):
+    """Sélectionne les meilleurs moments sans trop de chevauchement."""
 
-    for zone in range(nombre):
-        candidats_zone = [
-            candidat
-            for candidat in candidats
-            if candidat["zone"] == zone
-        ]
+    selections = []
 
-        if not candidats_zone:
+    for moment in moments:
+
+        centre = moment["milieu"]
+
+        debut = max(
+            0,
+            centre - DUREE_MAX_CLIP / 2
+        )
+
+        fin = min(
+            duree_video,
+            debut + DUREE_MAX_CLIP
+        )
+
+        debut = max(
+            0,
+            fin - DUREE_MAX_CLIP
+        )
+
+        if fin - debut < DUREE_MIN_CLIP:
             continue
 
-        meilleur = max(
-            candidats_zone,
-            key=lambda x: x["score"]
+        # Évite les clips trop proches les uns des autres
+        chevauchement = False
+
+        for selection in selections:
+
+            distance = abs(
+                centre - selection["milieu"]
+            )
+
+            if distance < DUREE_MAX_CLIP * 0.75:
+                chevauchement = True
+                break
+
+        if chevauchement:
+            continue
+
+        selections.append({
+            "debut": debut,
+            "fin": fin,
+            "milieu": centre,
+            "score": moment["score"],
+            "texte": moment["texte"]
+        })
+
+        if len(selections) >= nombre_clips:
+            break
+
+    # Complète si nécessaire avec des moments espacés
+    if len(selections) < nombre_clips:
+
+        pas = max(
+            DUREE_MAX_CLIP,
+            duree_video / max(nombre_clips, 1)
         )
 
-        selection.append(meilleur)
+        for index in range(nombre_clips):
 
-    selection.sort(key=lambda x: x["debut"])
+            if len(selections) >= nombre_clips:
+                break
 
-    return selection
+            centre = min(
+                duree_video - DUREE_MIN_CLIP / 2,
+                pas * index + pas / 2
+            )
+
+            if centre < 0:
+                continue
+
+            if any(
+                abs(centre - clip["milieu"]) < DUREE_MAX_CLIP * 0.75
+                for clip in selections
+            ):
+                continue
+
+            debut = max(
+                0,
+                centre - DUREE_MAX_CLIP / 2
+            )
+
+            fin = min(
+                duree_video,
+                debut + DUREE_MAX_CLIP
+            )
+
+            debut = max(
+                0,
+                fin - DUREE_MAX_CLIP
+            )
+
+            if fin - debut >= DUREE_MIN_CLIP:
+                selections.append({
+                    "debut": debut,
+                    "fin": fin,
+                    "milieu": centre,
+                    "score": 0,
+                    "texte": ""
+                })
+
+    selections.sort(
+        key=lambda element: element["debut"]
+    )
+
+    return selections[:nombre_clips]
 
 
 # ============================================================
-# CREATION CLIP RAPIDE
+# CRÉATION DES CLIPS AVEC FFMPEG
 # ============================================================
 
-def creer_clip(video, debut, fin, sortie, format_video):
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    duree = fin - debut
+def creer_clip(video, debut, fin, numero, format_video):
+    """Crée un clip avec FFmpeg."""
 
-    if duree <= 0:
-        raise RuntimeError("Durée de clip invalide.")
+    sortie = os.path.join(
+        DOSSIER_SORTIE,
+        f"ClipIA_{numero}.mp4"
+    )
+
+    duree = max(1, fin - debut)
 
     commande = [
-        ffmpeg,
+        FFMPEG,
         "-y",
         "-ss", str(debut),
         "-i", video,
         "-t", str(duree),
-        "-map", "0:v:0",
-        "-map", "0:a?",
+        "-analyzeduration", "10000000",
+        "-probesize", "10000000"
     ]
 
-    # FORMAT ORIGINAL : PAS DE REENCODAGE
     if format_video == "Original":
 
         commande += [
+            "-map", "0:v:0",
+            "-map", "0:a?",
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
             sortie
         ]
 
-    # FORMAT VERTICAL : FILTRE PLUS SIMPLE
     else:
 
         filtre = (
-            "scale=480:854:"
+            "scale=720:1280:"
             "force_original_aspect_ratio=decrease,"
-            "pad=480:854:(ow-iw)/2:(oh-ih)/2:color=black"
+            "pad=720:1280:(ow-iw)/2:(oh-ih)/2"
         )
 
         commande += [
@@ -434,8 +499,7 @@ def creer_clip(video, debut, fin, sortie, format_video):
             "-crf", "28",
             "-threads", "2",
             "-c:a", "aac",
-            "-b:a", "96k",
-            "-pix_fmt", "yuv420p",
+            "-b:a", "128k",
             "-movflags", "+faststart",
             sortie
         ]
@@ -444,152 +508,169 @@ def creer_clip(video, debut, fin, sortie, format_video):
         commande,
         capture_output=True,
         text=True,
-        timeout=180
+        timeout=300
     )
 
     if resultat.returncode != 0:
-        message = resultat.stderr or "Erreur FFmpeg inconnue."
-
         raise RuntimeError(
-            "Erreur FFmpeg : " + message[-1200:]
+            resultat.stderr[-2000:]
         )
 
-    if not os.path.isfile(sortie) or os.path.getsize(sortie) == 0:
-        raise RuntimeError("Le clip n'a pas été créé.")
+    if not os.path.exists(sortie):
+        raise RuntimeError("Le fichier vidéo n'a pas été créé.")
+
+    if os.path.getsize(sortie) == 0:
+        raise RuntimeError("Le fichier vidéo est vide.")
 
     return sortie
 
 
 # ============================================================
-# ANALYSE PRINCIPALE
+# FONCTION PRINCIPALE
 # ============================================================
 
-def analyser_video(
+def generer_clips(
     video,
     nombre_clips,
     format_video,
     progress=gr.Progress()
 ):
-    video = verifier_video(video)
+    """Lance toutes les étapes de création."""
 
-    dossier = tempfile.mkdtemp(prefix="clipia_")
+    if video is None:
+        raise gr.Error("Ajoute d'abord une vidéo.")
 
     try:
-        progress(
-            0.03,
-            desc="Lecture de la vidéo..."
-        )
+        nombre_clips = int(nombre_clips)
 
-        fps, total_frames, duree = obtenir_infos_video(video)
+        if nombre_clips < 1 or nombre_clips > NOMBRE_MAX_CLIPS:
+            raise gr.Error("Choisis entre 1 et 5 clips.")
 
-        if duree < 2:
+        nettoyer_dossier()
+
+        debut_total = time.time()
+
+        progress(0.02, desc="Lecture de la vidéo...")
+
+        informations = obtenir_infos_video(video)
+
+        if informations["duree"] < DUREE_MIN_CLIP:
             raise gr.Error("La vidéo est trop courte.")
 
-        nombre_clips = max(
-            1,
-            min(int(nombre_clips), NOMBRE_MAX_CLIPS)
-        )
-
-        progress(
-            0.10,
-            desc="Extraction de l'audio..."
-        )
-
-        audio_fichier = extraire_audio(
-            video,
-            dossier
-        )
-
-        progress(
-            0.20,
-            desc="Analyse audio avec Whisper..."
-        )
+        # ----------------------------------------------------
+        # ÉTAPE 1 : ANALYSE AUDIO
+        # ----------------------------------------------------
 
         audio = analyser_audio(
-            audio_fichier,
-            duree
+            video,
+            progress
         )
 
-        progress(
-            0.45,
-            desc="Analyse visuelle optimisée..."
-        )
+        # ----------------------------------------------------
+        # ÉTAPE 2 : ANALYSE VISUELLE
+        # ----------------------------------------------------
 
         visuel = analyser_visuellement(
             video,
-            fps,
-            total_frames,
-            duree
+            informations,
+            progress
         )
+
+        # ----------------------------------------------------
+        # ÉTAPE 3 : ANALYSE DES MOMENTS
+        # ----------------------------------------------------
 
         progress(
-            0.60,
-            desc="Recherche des meilleurs passages..."
+            0.55,
+            desc="Recherche des meilleurs moments..."
         )
 
-        candidats = creer_candidats(
-            duree,
+        moments = construire_moments(
             audio,
             visuel,
+            informations["duree"]
+        )
+
+        selections = selectionner_clips(
+            moments,
+            informations["duree"],
             nombre_clips
         )
 
-        selection = selectionner_passages(
-            candidats,
-            nombre_clips
-        )
-
-        if len(selection) != nombre_clips:
+        if not selections:
             raise gr.Error(
-                "Impossible de trouver tous les passages demandés."
+                "Aucun moment exploitable n'a été trouvé."
             )
 
-        resultats = []
-        total = len(selection)
+        # ----------------------------------------------------
+        # ÉTAPE 4 : CRÉATION DES CLIPS
+        # ----------------------------------------------------
 
-        for index, passage in enumerate(selection):
+        fichiers = []
+        descriptions = []
 
-            debut = passage["debut"]
-            fin = passage["fin"]
+        total = len(selections)
 
-            sortie = os.path.join(
-                dossier,
-                f"ClipIA_{index + 1}.mp4"
+        for index, selection in enumerate(selections):
+
+            progression = (
+                0.60 + 0.38 * index / total
             )
 
             progress(
-                0.65 + 0.30 * index / total,
+                progression,
                 desc=f"Création du clip {index + 1}/{total}..."
             )
 
-            creer_clip(
-                video,
-                debut,
-                fin,
-                sortie,
-                format_video
+            try:
+                fichier = creer_clip(
+                    video,
+                    selection["debut"],
+                    selection["fin"],
+                    index + 1,
+                    format_video
+                )
+
+                fichiers.append(fichier)
+
+                description = (
+                    f"Clip {index + 1} — "
+                    f"{selection['debut']:.1f}s à "
+                    f"{selection['fin']:.1f}s"
+                )
+
+                if selection["texte"]:
+                    description += (
+                        f"\nTranscription : {selection['texte']}"
+                    )
+
+                descriptions.append(description)
+
+            except Exception as erreur:
+                print(
+                    f"Erreur création clip {index + 1} :",
+                    erreur
+                )
+
+        if not fichiers:
+            raise gr.Error(
+                "Aucun clip n'a pu être créé. Vérifie le format de la vidéo."
             )
 
-            resultats.append(sortie)
-
-            progress(
-                0.65 + 0.30 * (index + 1) / total,
-                desc=f"Clip {index + 1}/{total} terminé..."
-            )
+        temps_total = time.time() - debut_total
 
         progress(
             1,
-            desc="Terminé !"
+            desc="Création terminée !"
         )
 
         message = (
-            f"ClipIA a créé {len(resultats)} clip(s) !\n"
-            f"Nombre demandé : {nombre_clips}\n"
-            f"Durée de la vidéo : {int(duree)} secondes.\n"
-            f"Format : {format_video}."
+            f"Terminé ! {len(fichiers)} clip(s) créé(s).\n"
+            f"Temps total : {temps_total:.1f} secondes.\n"
+            f"Format : {format_video}"
         )
 
-        return resultats, message
+        return fichiers, message, "\n\n".join(descriptions)
 
     except gr.Error:
         raise
@@ -600,82 +681,125 @@ def analyser_video(
         )
 
     except Exception as erreur:
-        print("Erreur ClipIA :", repr(erreur))
+        print("ERREUR CLIPIA :", repr(erreur))
 
         raise gr.Error(
-            f"Une erreur est survenue : {str(erreur)}"
+            f"Une erreur est survenue : {str(erreur)[:1000]}"
         )
 
 
 # ============================================================
-# INTERFACE
+# INTERFACE GRADIO
 # ============================================================
 
-with gr.Blocks(title="ClipIA V4") as demo:
+CSS = """
+.gradio-container {
+    max-width: 1100px !important;
+    margin: auto !important;
+}
+
+#titre {
+    text-align: center;
+}
+
+#bouton {
+    min-height: 55px;
+    font-size: 18px;
+    font-weight: bold;
+}
+
+#resultat {
+    border-radius: 15px;
+}
+"""
+
+
+with gr.Blocks(css=CSS) as application:
 
     gr.Markdown(
         """
         # 🎬 ClipIA V4
 
-        ### Transforme automatiquement tes vidéos en clips !
+        ### Transforme tes vidéos en clips automatiquement.
 
-        Ajoute une vidéo, choisis le nombre de clips
-        et laisse ClipIA analyser les passages.
-        """
-    )
-
-    video = gr.Video(
-        label="Choisis ta vidéo",
-        sources=["upload"]
+        Ajoute une vidéo, choisis le nombre de clips et laisse ClipIA
+        rechercher les meilleurs moments.
+        """,
+        elem_id="titre"
     )
 
     with gr.Row():
 
-        nombre = gr.Slider(
-            minimum=1,
-            maximum=5,
-            value=3,
-            step=1,
-            label="Nombre de clips"
-        )
+        with gr.Column():
 
-        format_video = gr.Radio(
-            choices=[
-                "Original",
-                "Vertical 9:16"
-            ],
-            value="Vertical 9:16",
-            label="Format des clips"
-        )
+            video = gr.Video(
+                label="Ta vidéo",
+                sources=["upload"],
+                format="mp4"
+            )
 
-    bouton = gr.Button(
-        "🚀 Générer mes clips",
-        variant="primary"
-    )
+            nombre_clips = gr.Slider(
+                minimum=1,
+                maximum=5,
+                value=3,
+                step=1,
+                label="Nombre de clips"
+            )
 
-    resultat = gr.Gallery(
-        label="Tes clips ClipIA",
-        columns=2,
-        height="auto",
-        object_fit="contain"
-    )
+            format_video = gr.Radio(
+                choices=[
+                    "Original",
+                    "Vertical 9:16"
+                ],
+                value="Original",
+                label="Format des clips"
+            )
+
+            bouton = gr.Button(
+                "🚀 GÉNÉRER MES CLIPS",
+                variant="primary",
+                elem_id="bouton"
+            )
+
+    gr.Markdown("## 📁 Résultats")
 
     message = gr.Textbox(
         label="État du traitement",
+        interactive=False,
+        lines=3
+    )
+
+    galerie = gr.File(
+        label="Télécharger les clips",
+        file_count="multiple",
         interactive=False
     )
 
+    descriptions = gr.Textbox(
+        label="Informations sur les clips",
+        interactive=False,
+        lines=8
+    )
+
     bouton.click(
-        fn=analyser_video,
+        fn=generer_clips,
         inputs=[
             video,
-            nombre,
+            nombre_clips,
             format_video
         ],
         outputs=[
-            resultat,
-            message
+            galerie,
+            message,
+            descriptions
         ]
+    )
+
+    gr.Markdown(
+        """
+        ---
+        **ClipIA V4** — Génération automatique de clips.
+        """
     )
 
 
@@ -685,10 +809,14 @@ with gr.Blocks(title="ClipIA V4") as demo:
 
 if __name__ == "__main__":
 
-    demo.queue(max_size=5).launch(
-        server_name="0.0.0.0",
-        server_port=int(os.environ.get("PORT", 7860)),
-        theme=gr.themes.Soft()
+    application.queue(
+        default_concurrency_limit=1
     )
-    
-             
+
+    application.launch(
+        server_name="0.0.0.0",
+        server_port=int(
+            os.environ.get("PORT", 7860)
+        )
+        )
+        
