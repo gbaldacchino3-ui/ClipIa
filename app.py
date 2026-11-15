@@ -969,30 +969,85 @@ CSS = """
 }
 """
 
-with gr.Blocks(
-    title="ClipIA V7"
-) as application:
+                video = gr.Video(
+                    label="📁 Vidéo du podcast",
+                    sources=["upload"],
+                    type="filepath"
+                )
 
-    gr.Markdown(
-        """
-        # 🎬 ClipIA V7
-        ### Transforme automatiquement tes podcasts en clips courts.
-        """,
-        elem_id="titre"
-    )
+                nombre_clips = gr.Slider(
+                    minimum=1,
+                    maximum=5,
+                    value=3,
+                    step=1,
+                    label="Nombre de clips"
+                )
 
-    gr.Markdown(
-        """
-        Ajoute une vidéo, choisis tes options
-        et laisse ClipIA sélectionner les passages.
-        """,
-        elem_id="description"
-    )
+                format_video = gr.Dropdown(
+                    choices=[
+                        "Original",
+                        "Vertical 9:16",
+                        "Carré 1:1",
+                        "Horizontal 16:9"
+                    ],
+                    value="Vertical 9:16",
+                    label="Format des clips"
+                )
 
-    with gr.Row():
+            with gr.Column():
+                gr.Markdown("### ⚙️ Personnalisation")
 
-        with gr.Column():
+                sous_titres_actifs = gr.Checkbox(
+                    value=True,
+                    label="💬 Activer les sous-titres"
+                )
 
-            video = gr.Video(
-                label="📁 Vidéo du podcast",
-       
+                emojis_actifs = gr.Checkbox(
+                    value=True,
+                    label="🚀 Activer les émojis business"
+                )
+
+        bouton = gr.Button(
+            "🚀 GÉNÉRER MES CLIPS",
+            variant="primary",
+            size="lg"
+        )
+
+        statut = gr.Textbox(
+            label="📊 Progression et résultat",
+            interactive=False,
+            lines=5
+        )
+
+        fichiers = gr.File(
+            label="🎬 Tes clips",
+            file_count="multiple",
+            interactive=False
+        )
+
+        bouton.click(
+            fn=generer_clips,
+            inputs=[
+                video,
+                nombre_clips,
+                format_video,
+                sous_titres_actifs,
+                emojis_actifs
+            ],
+            outputs=[fichiers, statut]
+        )
+
+        gr.Markdown(
+            """
+            ---
+            **ClipIA V7** · Génération automatique de clips
+            """
+        )
+
+if __name__ == "__main__":
+    application.launch(
+        server_name="0.0.0.0",
+        server_port=int(os.environ.get("PORT", 7860)),
+        css=CSS
+)
+                
