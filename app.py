@@ -13,7 +13,7 @@ from faster_whisper import WhisperModel
 
 NOMBRE_MAX_CLIPS = 5
 DUREE_MAX_CLIP = 30
-INTERVALLE_ANALYSE = 3
+INTERVALLE_ANALYSE = 4
 MODELE_WHISPER = "tiny"
 
 modele_whisper = None
@@ -30,7 +30,9 @@ def charger_whisper():
         modele_whisper = WhisperModel(
             MODELE_WHISPER,
             device="cpu",
-            compute_type="int8"
+            compute_type="int8",
+            cpu_threads=2,
+            num_workers=1
         )
 
     return modele_whisper
@@ -87,12 +89,14 @@ def extraire_audio(video, dossier):
     audio = os.path.join(dossier, "audio.wav")
 
     commande = [
-        ffmpeg, "-y",
+        ffmpeg,
+        "-y",
         "-i", video,
         "-vn",
         "-ac", "1",
         "-ar", "16000",
         "-acodec", "pcm_s16le",
+        "-threads", "2",
         audio
     ]
 
@@ -101,13 +105,15 @@ def extraire_audio(video, dossier):
             commande,
             capture_output=True,
             text=True,
-            timeout=180
+            timeout=120
         )
+
     except subprocess.TimeoutExpired:
+        print("Extraction audio trop longue.")
         return None
 
     if resultat.returncode != 0:
-        print("Erreur extraction audio :", resultat.stderr[-1000:])
+        print("Erreur audio :", resultat.stderr[-1000:])
         return None
 
     if not os.path.isfile(audio) or os.path.getsize(audio) == 0:
@@ -131,7 +137,9 @@ def analyser_audio(audio, duree):
             audio,
             language="fr",
             beam_size=1,
-            vad_filter=True
+            best_of=1,
+            vad_filter=True,
+            condition_on_previous_text=False
         )
 
         passages = []
@@ -179,7 +187,7 @@ def analyser_audio(audio, duree):
 
 
 # ============================================================
-# ANALYSE VISUELLE
+# ANALYSE VISUELLE OPTIMISEE
 # ============================================================
 
 def analyser_visuellement(video, fps, total_frames, duree):
@@ -190,52 +198,65 @@ def analyser_visuellement(video, fps, total_frames, duree):
 
     resultats = []
     ancienne_image = None
-    temps = 0
+
+    intervalle_frames = max(
+        1,
+        int(fps * INTERVALLE_ANALYSE)
+    )
+
+    numero_frame = 0
+    temps_suivant = 0
 
     try:
-        while temps < duree:
-            capture.set(
-                cv2.CAP_PROP_POS_MSEC,
-                temps * 1000
-            )
-
+        while True:
             ok, image = capture.read()
 
             if not ok:
-                temps += INTERVALLE_ANALYSE
-                continue
+                break
 
-            image = cv2.resize(image, (320, 180))
+            if numero_frame % intervalle_frames == 0:
+                temps = numero_frame / fps
 
-            gris = cv2.cvtColor(
-                image,
-                cv2.COLOR_BGR2GRAY
-            )
+                if temps > duree:
+                    break
 
-            nettete = cv2.Laplacian(
-                gris,
-                cv2.CV_64F
-            ).var()
-
-            mouvement = 0
-
-            if ancienne_image is not None:
-                difference = cv2.absdiff(
-                    gris,
-                    ancienne_image
+                image = cv2.resize(
+                    image,
+                    (320, 180),
+                    interpolation=cv2.INTER_AREA
                 )
-                mouvement = float(difference.mean())
 
-            score = min(nettete / 15, 20)
-            score += min(mouvement * 1.5, 20)
+                gris = cv2.cvtColor(
+                    image,
+                    cv2.COLOR_BGR2GRAY
+                )
 
-            resultats.append({
-                "temps": temps,
-                "score": score
-            })
+                nettete = cv2.Laplacian(
+                    gris,
+                    cv2.CV_64F
+                ).var()
 
-            ancienne_image = gris.copy()
-            temps += INTERVALLE_ANALYSE
+                mouvement = 0
+
+                if ancienne_image is not None:
+                    difference = cv2.absdiff(
+                        gris,
+                        ancienne_image
+                    )
+
+                    mouvement = float(difference.mean())
+
+                score = min(nettete / 15, 20)
+                score += min(mouvement * 1.5, 20)
+
+                resultats.append({
+                    "temps": temps,
+                    "score": score
+                })
+
+                ancienne_image = gris.copy()
+
+            numero_frame += 1
 
     finally:
         capture.release()
@@ -286,7 +307,10 @@ def creer_candidats(duree, audio, visuel, nombre):
 
     for zone in range(nombre):
         debut_zone = zone * taille_zone
-        fin_zone = min((zone + 1) * taille_zone, duree)
+        fin_zone = min(
+            (zone + 1) * taille_zone,
+            duree
+        )
 
         dernier_debut = max(
             debut_zone,
@@ -300,7 +324,10 @@ def creer_candidats(duree, audio, visuel, nombre):
             debuts.append(temps)
             temps += pas
 
-        if not debuts or abs(debuts[-1] - dernier_debut) > 0.1:
+        if (
+            not debuts
+            or abs(debuts[-1] - dernier_debut) > 0.1
+        ):
             debuts.append(dernier_debut)
 
         meilleur = None
@@ -361,7 +388,7 @@ def selectionner_passages(candidats, nombre):
 
 
 # ============================================================
-# CREATION CLIP FFMPEG
+# CREATION CLIP RAPIDE
 # ============================================================
 
 def creer_clip(video, debut, fin, sortie, format_video):
@@ -376,43 +403,38 @@ def creer_clip(video, debut, fin, sortie, format_video):
         "-y",
         "-ss", str(debut),
         "-i", video,
-        "-t", str(duree)
+        "-t", str(duree),
+        "-map", "0:v:0",
+        "-map", "0:a?",
     ]
 
-    if format_video == "Vertical 9:16":
-        filtre = (
-            "[0:v]split=2[arriere][avant];"
-            "[arriere]scale=480:854:"
-            "force_original_aspect_ratio=increase,"
-            "crop=480:854,boxblur=20:10[fond];"
-            "[avant]scale=480:854:"
-            "force_original_aspect_ratio=decrease[image];"
-            "[fond][image]overlay=(W-w)/2:(H-h)/2[sortie]"
-        )
+    # FORMAT ORIGINAL : PAS DE REENCODAGE
+    if format_video == "Original":
 
         commande += [
-            "-filter_complex", filtre,
-            "-map", "[sortie]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "25",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-pix_fmt", "yuv420p",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
             "-movflags", "+faststart",
             sortie
         ]
 
+    # FORMAT VERTICAL : FILTRE PLUS SIMPLE
     else:
+
+        filtre = (
+            "scale=480:854:"
+            "force_original_aspect_ratio=decrease,"
+            "pad=480:854:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
+
         commande += [
-            "-map", "0:v:0",
-            "-map", "0:a?",
+            "-vf", filtre,
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-crf", "25",
+            "-crf", "28",
+            "-threads", "2",
             "-c:a", "aac",
-            "-b:a", "128k",
+            "-b:a", "96k",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             sortie
@@ -422,12 +444,15 @@ def creer_clip(video, debut, fin, sortie, format_video):
         commande,
         capture_output=True,
         text=True,
-        timeout=240
+        timeout=180
     )
 
     if resultat.returncode != 0:
         message = resultat.stderr or "Erreur FFmpeg inconnue."
-        raise RuntimeError("Erreur FFmpeg : " + message[-1200:])
+
+        raise RuntimeError(
+            "Erreur FFmpeg : " + message[-1200:]
+        )
 
     if not os.path.isfile(sortie) or os.path.getsize(sortie) == 0:
         raise RuntimeError("Le clip n'a pas été créé.")
@@ -450,7 +475,10 @@ def analyser_video(
     dossier = tempfile.mkdtemp(prefix="clipia_")
 
     try:
-        progress(0.03, desc="Lecture de la vidéo...")
+        progress(
+            0.03,
+            desc="Lecture de la vidéo..."
+        )
 
         fps, total_frames, duree = obtenir_infos_video(video)
 
@@ -462,15 +490,30 @@ def analyser_video(
             min(int(nombre_clips), NOMBRE_MAX_CLIPS)
         )
 
-        progress(0.10, desc="Extraction de l'audio...")
+        progress(
+            0.10,
+            desc="Extraction de l'audio..."
+        )
 
-        audio_fichier = extraire_audio(video, dossier)
+        audio_fichier = extraire_audio(
+            video,
+            dossier
+        )
 
-        progress(0.20, desc="Analyse audio avec Whisper...")
+        progress(
+            0.20,
+            desc="Analyse audio avec Whisper..."
+        )
 
-        audio = analyser_audio(audio_fichier, duree)
+        audio = analyser_audio(
+            audio_fichier,
+            duree
+        )
 
-        progress(0.45, desc="Analyse visuelle...")
+        progress(
+            0.45,
+            desc="Analyse visuelle optimisée..."
+        )
 
         visuel = analyser_visuellement(
             video,
@@ -479,7 +522,10 @@ def analyser_video(
             duree
         )
 
-        progress(0.60, desc="Recherche des passages...")
+        progress(
+            0.60,
+            desc="Recherche des meilleurs passages..."
+        )
 
         candidats = creer_candidats(
             duree,
@@ -502,6 +548,7 @@ def analyser_video(
         total = len(selection)
 
         for index, passage in enumerate(selection):
+
             debut = passage["debut"]
             fin = passage["fin"]
 
@@ -530,7 +577,10 @@ def analyser_video(
                 desc=f"Clip {index + 1}/{total} terminé..."
             )
 
-        progress(1, desc="Terminé !")
+        progress(
+            1,
+            desc="Terminé !"
+        )
 
         message = (
             f"ClipIA a créé {len(resultats)} clip(s) !\n"
@@ -551,6 +601,7 @@ def analyser_video(
 
     except Exception as erreur:
         print("Erreur ClipIA :", repr(erreur))
+
         raise gr.Error(
             f"Une erreur est survenue : {str(erreur)}"
         )
@@ -560,16 +611,16 @@ def analyser_video(
 # INTERFACE
 # ============================================================
 
-with gr.Blocks(title="ClipIA V3") as demo:
+with gr.Blocks(title="ClipIA V4") as demo:
 
     gr.Markdown(
         """
-        # 🎬 ClipIA V3
+        # 🎬 ClipIA V4
 
         ### Transforme automatiquement tes vidéos en clips !
 
-        Ajoute une vidéo, choisis le nombre de clips et laisse
-        ClipIA analyser les meilleurs passages.
+        Ajoute une vidéo, choisis le nombre de clips
+        et laisse ClipIA analyser les passages.
         """
     )
 
@@ -640,3 +691,4 @@ if __name__ == "__main__":
         theme=gr.themes.Soft()
     )
     
+             
