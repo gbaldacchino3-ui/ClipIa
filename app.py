@@ -463,10 +463,7 @@ def emoji_business(text):
 
     # Défaut : moment intéressant
     return "🔥 "
-    
-        
-    ):
-        return "📈 "
+
 
     if any(
         word in lower
