@@ -407,30 +407,64 @@ def format_srt_time(seconds):
     )
 
 
+
 def emoji_business(text):
 
     lower = text.lower()
 
-    if any(
-        word in lower
-        for word in (
-            "argent",
-            "revenu",
-            "prix",
-            "vente",
-            "profit"
-        )
-    ):
+    # Humour et réactions
+    if any(word in lower for word in (
+        "drôle", "rigoler", "blague", "rire",
+        "mdr", "hilarant", "amusant"
+    )):
+        return "😂 "
+
+    # Surprise et révélation
+    if any(word in lower for word in (
+        "incroyable", "surprenant", "choquant",
+        "impossible", "jamais imaginé", "révélation"
+    )):
+        return "😱 "
+
+    # Argent et business
+    if any(word in lower for word in (
+        "argent", "revenu", "prix", "vente",
+        "profit", "business", "entreprise"
+    )):
         return "💰 "
 
-    if any(
-        word in lower
-        for word in (
-            "client",
-            "marketing",
-            "marque",
-            "vente"
-        )
+    # Réflexion et apprentissage
+    if any(word in lower for word in (
+        "comprendre", "apprendre", "connaissance",
+        "réfléchir", "explication", "idée"
+    )):
+        return "🧠 "
+
+    # Motivation et réussite
+    if any(word in lower for word in (
+        "réussir", "objectif", "motivation",
+        "succès", "progresser", "courage"
+    )):
+        return "🚀 "
+
+    # Émotion
+    if any(word in lower for word in (
+        "amour", "émotion", "famille",
+        "touchant", "heureux", "triste"
+    )):
+        return "❤️ "
+
+    # Sport
+    if any(word in lower for word in (
+        "football", "match", "sport", "joueur",
+        "équipe", "champion"
+    )):
+        return "⚽ "
+
+    # Défaut : moment intéressant
+    return "🔥 "
+    
+        
     ):
         return "📈 "
 
