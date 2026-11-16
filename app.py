@@ -881,7 +881,6 @@ with gr.Blocks(
             video = gr.Video(
                 label="📁 Vidéo du podcast",
                 sources=["upload"],
-                type="filepath"
             )
 
             nombre_clips = gr.Slider(
