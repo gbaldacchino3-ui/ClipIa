@@ -1036,4 +1036,87 @@ def generer_clips(
         )
 
 
-# ======================================
+# ============================================================
+# INTERFACE ET DÉMARRAGE
+# ============================================================
+
+with gr.Blocks(title=APP_NAME) as application:
+
+    gr.Markdown("# 🎬 ClipIA V9")
+    gr.Markdown("Transforme automatiquement tes podcasts en clips courts.")
+
+    video = gr.Video(
+        label="📁 Vidéo du podcast",
+        sources=["upload"]
+    )
+
+    nombre_clips = gr.Slider(
+        minimum=1,
+        maximum=MAX_CLIPS,
+        value=3,
+        step=1,
+        label="Nombre de clips"
+    )
+
+    format_video = gr.Dropdown(
+        choices=[
+            "Original",
+            "Vertical 9:16",
+            "Carré 1:1",
+            "Horizontal 16:9"
+        ],
+        value="Vertical 9:16",
+        label="Format des clips"
+    )
+
+    sous_titres_actifs = gr.Checkbox(
+        value=True,
+        label="💬 Activer les sous-titres"
+    )
+
+    emojis_actifs = gr.Checkbox(
+        value=True,
+        label="✨ Activer les émojis"
+    )
+
+    bouton = gr.Button(
+        "🚀 GÉNÉRER MES CLIPS",
+        variant="primary"
+    )
+
+    statut = gr.Textbox(
+        label="📊 Progression et résultat",
+        interactive=False,
+        lines=8
+    )
+
+    fichiers = gr.File(
+        label="🎬 Tes clips",
+        file_count="multiple",
+        interactive=False
+    )
+
+    bouton.click(
+        fn=generer_clips,
+        inputs=[
+            video,
+            nombre_clips,
+            format_video,
+            sous_titres_actifs,
+            emojis_actifs
+        ],
+        outputs=[
+            fichiers,
+            statut
+        ]
+    )
+
+
+if __name__ == "__main__":
+    application.queue()
+
+    application.launch(
+        server_name="0.0.0.0",
+        server_port=int(os.environ.get("PORT", "7860")),
+        show_error=True
+    )
