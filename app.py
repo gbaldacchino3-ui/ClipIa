@@ -844,7 +844,7 @@ def generer_clips(
             f"🎬 Format : {format_video}\n"
             f"💬 Sous-titres : "
             f"{'activés' if sous_titres_actifs else 'désactivés'}\n"
-            f"✨ Émojis business : "
+            f"✨ Émojis : "
             f"{'activés' if emojis_actifs else 'désactivés'}\n\n"
             "Télécharge tes clips dans la liste ci-dessous."
         )
@@ -946,7 +946,7 @@ with gr.Blocks(
 
             emojis_actifs = gr.Checkbox(
                 value=True,
-                label="✨ Activer les émojis business"
+                label="✨ Activer les émojis "
             )
 
             gr.Markdown(
